@@ -8,7 +8,7 @@ The way it works:
 
 Sender, that has NEAR:
 - Creates a new key pair `(pk1, privkey1)`.
-- Calls `slimedrop.create_drop(pk1)` with attached balance of NEAR that they want to send.
+- Calls `slimedrop.add_near(pk1)` with attached balance of NEAR that they want to send.
 - Sends a link to any supported wallet app with `privkey1` as part of URL.
 
 Receiver, that doesn't have NEAR:

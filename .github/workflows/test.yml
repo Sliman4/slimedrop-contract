@@ -34,8 +34,7 @@ jobs:
     
     - name: Build contract
       run: |
-        # Run the build script to create the WASM
-        ./build.sh
+        cargo near build reproducible-wasm
         echo "✅ Contract built successfully!"
         echo "WASM checksum: $(sha256sum target/near/slimedrop.wasm)"
         echo "ABI checksum: $(sha256sum target/near/slimedrop_abi.json)"

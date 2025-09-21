@@ -49,7 +49,7 @@ async fn test_get_missing_key_panics() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[tokio::test]
-async fn test_create_drop_and_get_balance() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_add_near_and_get_balance() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
     let contract_wasm = near_workspaces::compile_project("./").await?;
     let root = sandbox.root_account()?;
@@ -79,7 +79,7 @@ async fn test_create_drop_and_get_balance() -> Result<(), Box<dyn std::error::Er
 
     // Create a drop
     let outcome = user_account
-        .call(contract.id(), "create_drop")
+        .call(contract.id(), "add_near")
         .args_json(json!({"public_key": public_key}))
         .deposit(ONE_NEAR)
         .transact()
@@ -150,7 +150,7 @@ async fn test_drop_claim() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a drop with the public key
     let outcome = sender_account
-        .call(contract.id(), "create_drop")
+        .call(contract.id(), "add_near")
         .args_json(json!({"public_key": public_key}))
         .deposit(ONE_NEAR)
         .transact()
@@ -214,7 +214,7 @@ async fn test_send_two_times() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create first drop
     let outcome1 = user_account
-        .call(contract.id(), "create_drop")
+        .call(contract.id(), "add_near")
         .args_json(json!({"public_key": public_key}))
         .deposit(ONE_NEAR)
         .transact()
@@ -235,7 +235,7 @@ async fn test_send_two_times() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create second drop with the same key (should add to existing balance)
     let outcome2 = user_account
-        .call(contract.id(), "create_drop")
+        .call(contract.id(), "add_near")
         .args_json(json!({"public_key": public_key}))
         .deposit(additional_deposit)
         .transact()
@@ -261,7 +261,7 @@ async fn test_send_two_times() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
-async fn test_create_drop_requires_deposit() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_add_near_requires_deposit() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
     let contract_wasm = near_workspaces::compile_project("./").await?;
     let root = sandbox.root_account()?;
@@ -291,7 +291,7 @@ async fn test_create_drop_requires_deposit() -> Result<(), Box<dyn std::error::E
 
     // Try to create a drop without any deposit - should fail
     let result = user_account
-        .call(contract.id(), "create_drop")
+        .call(contract.id(), "add_near")
         .args_json(json!({"public_key": public_key}))
         .deposit(NearToken::from_near(0)) // no deposit
         .transact()

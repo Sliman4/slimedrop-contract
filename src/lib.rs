@@ -35,7 +35,7 @@ impl SlimeDrop {
 
     /// Allows given public key to claim sent balance.
     #[payable]
-    pub fn create_drop(&mut self, public_key: PublicKey) {
+    pub fn add_near(&mut self, public_key: PublicKey) {
         assert!(
             env::attached_deposit() > NearToken::from_near(0),
             "Attached deposit must be at least 1 yoctoNEAR"
