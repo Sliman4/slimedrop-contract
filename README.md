@@ -15,12 +15,9 @@ Receiver, that doesn't have NEAR:
 - Receives link to the wallet with `privkey1`.
 - Wallet creates new key pair for this user (or they generate it via HSM) `(pk2, privkey2)`.
 - Enters the `new_account_id` receiver want for their new account.
-- Wallet relayer creates user's account with `new_account_id` name, `pk2` as full access key, and `pk1` as function call key that can only claim Slimedrops.
-- Wallet creates a transaction to `slimedrop.claim()` and wallet relayer sponsors it.
+- Wallet relayer creates user's account with `new_account_id` name and `pk2` as full access key.
+- Wallet creates a transaction to `slimedrop.claim()` and wallet relayer sponsors it. The transaction argument includes signed `"I want to claim this Slimedrop"` or `"I want to claim this Slimedrop and send it to bob.near"` NEP-413 message with recipient `slimedrop` (contract account ID), and nonce is the current timestamp in big endian, which cannot be older than 5 minutes by the time the transaction is executed.
 - Contract transfers tokens that Sender sent.
-- Optionally, remove `pk1` functio ncall key.
 
 If Receiver already has account (or Sender wants to get back the money):
-- Temporarily add `pk1` as their function call key.
-- Sign tx with `privkey1` to call `slimedrop.claim()`, which transfers money to signer's account.
-- Optionally, remove `pk1` function call key.
+- Sign tx with `privkey1` to call `slimedrop.claim()` with same arguments, which transfers money to signer's account.
