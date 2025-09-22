@@ -18,7 +18,7 @@ near-workspaces = { version = "0.21.0", features = ["unstable"] }
 tokio = { version = "1.0", features = ["full"] }
 anyhow = "1.0"
 near-sdk = { version = "5.17.0", features = ["unit-testing"] }
-near-api = "0.6.1"
+near-api = { version = "0.6.1", default-features = false }
 near-crypto = "0.32.0"
 
 [profile.release]
