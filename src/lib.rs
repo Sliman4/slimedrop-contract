@@ -2,17 +2,32 @@ use near_sdk::{
     AccountId, CurveType, NearToken, PanicOnDefault, Promise, PublicKey,
     env::{self, sha256},
     json_types::{Base64VecU8, U64},
-    near, require,
+    near,
     store::{IterableMap, LookupMap, Vector},
 };
+
+macro_rules! require {
+    (let $p: pat = $e:expr, $message:expr $(,)?) => {
+        let $p = $e else {
+            $crate::env::panic_str(&$message)
+        };
+    };
+    ($cond:expr, $message:expr $(,)?) => {
+        if cfg!(debug_assertions) {
+            assert!($cond, "{}", &$message)
+        } else if !$cond {
+            $crate::env::panic_str(&$message)
+        }
+    };
+}
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct SlimedropContract {
-    /// Map of all active drops
-    pub accounts: LookupMap<PublicKey, Slimedrop>,
-    /// Map of all drops an account has contributed to
-    pub contributed_to: IterableMap<AccountId, Vector<PublicKey>>,
+    /// Map of all drops
+    pub drops: LookupMap<PublicKey, Slimedrop>,
+    /// Map of all drops an account has created
+    pub drops_owned_by_account: IterableMap<AccountId, Vector<PublicKey>>,
 }
 
 #[near(serializers=[borsh])]
@@ -21,6 +36,14 @@ pub struct Slimedrop {
     pub created_at_ms: U64,
     pub created_by: AccountId,
     pub claims: Vector<Claim>,
+    pub status: DropStatus,
+}
+
+#[near(serializers=[borsh, json])]
+#[derive(Clone, Copy, PartialEq)]
+pub enum DropStatus {
+    Active,
+    Cancelled,
 }
 
 #[near(serializers=[json])]
@@ -29,6 +52,7 @@ pub struct SlimedropView {
     pub created_at_ms: U64,
     pub created_by: AccountId,
     pub claims: Vec<Claim>,
+    pub status: DropStatus,
 }
 
 impl From<&Slimedrop> for SlimedropView {
@@ -38,6 +62,7 @@ impl From<&Slimedrop> for SlimedropView {
             created_at_ms: drop.created_at_ms,
             created_by: drop.created_by.clone(),
             claims: drop.claims.into_iter().cloned().collect(),
+            status: drop.status,
         }
     }
 }
@@ -69,32 +94,33 @@ impl SlimedropContract {
     #[init]
     pub fn new() -> Self {
         Self {
-            accounts: LookupMap::new(b"a"),
-            contributed_to: IterableMap::new(b"b"),
+            drops: LookupMap::new(b"a"),
+            drops_owned_by_account: IterableMap::new(b"b"),
         }
     }
 
-    /// Allows given public key to claim sent balance.
+    /// Allows given public key to claim sent balance. If the drop already
+    /// exists, it will add to the existing balance.
     #[payable]
     pub fn add_near(&mut self, public_key: PublicKey) {
         assert!(
             env::attached_deposit() > NearToken::from_near(0),
             "Attached deposit must be at least 1 yoctoNEAR"
         );
-        if let Some(drop) = self.accounts.get_mut(&public_key) {
-            if !drop.claims.is_empty() {
-                env::panic_str("Drop already claimed");
-            }
+        if let Some(drop) = self.drops.get_mut(&public_key) {
+            require!(
+                drop.created_by == env::predecessor_account_id(),
+                "You can only add NEAR to drops you created"
+            );
+            require!(drop.claims.is_empty(), "Drop already claimed");
+            require!(
+                drop.status == DropStatus::Active,
+                "Cannot add to cancelled drop"
+            );
             let contents = DropContents {
                 near: drop.contents.near.saturating_add(env::attached_deposit()),
             };
             drop.contents = contents;
-            self.contributed_to
-                .entry(env::predecessor_account_id())
-                .or_insert_with(|| {
-                    Vector::new(format!("c{}", env::predecessor_account_id()).as_bytes())
-                })
-                .push(public_key);
         } else {
             let drop = Slimedrop {
                 contents: DropContents {
@@ -103,9 +129,10 @@ impl SlimedropContract {
                 created_at_ms: U64(env::block_timestamp_ms()),
                 created_by: env::predecessor_account_id(),
                 claims: Vector::new([b"d", public_key.as_bytes()].concat()),
+                status: DropStatus::Active,
             };
-            self.accounts.insert(public_key.clone(), drop);
-            self.contributed_to
+            self.drops.insert(public_key.clone(), drop);
+            self.drops_owned_by_account
                 .entry(env::predecessor_account_id())
                 .or_insert_with(|| {
                     Vector::new(format!("c{}", env::predecessor_account_id()).as_bytes())
@@ -132,12 +159,11 @@ impl SlimedropContract {
         require!(current_timestamp_ms >= nonce.0, "Nonce is in the future");
 
         let nonce = nonce.0.to_be_bytes();
-        let Ok(nonce) = [vec![0; 32 - nonce.len()], nonce.to_vec()]
+        require!(let Ok(nonce) = [vec![0; 32 - nonce.len()], nonce.to_vec()]
             .concat()
-            .try_into()
-        else {
-            env::panic_str("unreachable");
-        };
+            .try_into(),
+            "Invalid nonce",
+        );
 
         #[near(serializers=[borsh])]
         struct Nep413Message {
@@ -156,9 +182,10 @@ impl SlimedropContract {
         };
         const NEP413_413_SIGN_MESSAGE_PREFIX: u32 = (1u32 << 31u32) + 413u32;
         let mut bytes = NEP413_413_SIGN_MESSAGE_PREFIX.to_le_bytes().to_vec();
-        if let Err(e) = near_sdk::borsh::to_writer(&mut bytes, &message) {
-            env::panic_str(&format!("nep413 message borsh serialization failed: {e}"));
-        };
+        require!(
+            near_sdk::borsh::to_writer(&mut bytes, &message).is_ok(),
+            "nep413 message borsh serialization failed",
+        );
         let hash = sha256(&bytes);
         let verified = match public_key.curve_type() {
             CurveType::ED25519 => env::ed25519_verify(
@@ -189,23 +216,22 @@ impl SlimedropContract {
         };
         require!(verified, "Failed to verify signature");
 
-        let drop = self
-            .accounts
-            .get_mut(&public_key)
-            .expect("Unexpected public key");
-        if !drop.claims.is_empty() {
-            env::panic_str("Drop already claimed");
-        }
+        require!(
+            let Some(drop) = self.drops.get_mut(&public_key),
+            "Unexpected public key",
+        );
+        require!(drop.claims.is_empty(), "Drop already claimed");
+        require!(drop.status == DropStatus::Active, "Drop is not active");
         drop.claims.push(Claim {
             account_id: receiver_id.clone(),
             claimed_at_ms: U64(current_timestamp_ms),
         });
-        Promise::new(receiver_id).transfer(drop.contents.near)
+        send_drop(drop, receiver_id)
     }
 
     /// Returns the drop info associated with given key.
-    pub fn get_key_info(&self, key: PublicKey) -> SlimedropView {
-        self.accounts.get(&key).expect("Key is missing").into()
+    pub fn get_key_info(&self, key: PublicKey) -> Option<SlimedropView> {
+        self.drops.get(&key).map(|drop| drop.into())
     }
 
     /// Returns the drops an account has contributed to.
@@ -215,16 +241,37 @@ impl SlimedropContract {
         skip: Option<U64>,
         limit: Option<U64>,
     ) -> Vec<SlimedropView> {
-        let Some(contributed_to) = self.contributed_to.get(&account_id) else {
+        let Some(drops_owned_by_account) = self.drops_owned_by_account.get(&account_id) else {
             return vec![];
         };
         let skip = skip.unwrap_or(U64(0));
         let limit = limit.unwrap_or(U64(100));
-        contributed_to
+        drops_owned_by_account
             .iter()
             .skip(skip.0 as usize)
             .take(limit.0 as usize)
-            .map(|key| self.accounts.get(key).expect("Key is missing").into())
+            .map(|key| {
+                self.drops
+                    .get(key)
+                    .unwrap_or_else(|| env::panic_str("Key is missing"))
+                    .into()
+            })
             .collect()
     }
+
+    pub fn cancel_drop(&mut self, public_key: PublicKey) -> Promise {
+        require!(let Some(drop) = self.drops.get_mut(&public_key), "Key is missing");
+        require!(
+            drop.created_by == env::predecessor_account_id(),
+            "You can only cancel drops you created"
+        );
+        require!(drop.status == DropStatus::Active, "Drop already cancelled");
+        require!(drop.claims.is_empty(), "Drop already claimed");
+        drop.status = DropStatus::Cancelled;
+        send_drop(drop, drop.created_by.clone())
+    }
+}
+
+fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
+    Promise::new(receiver_id).transfer(drop.contents.near)
 }

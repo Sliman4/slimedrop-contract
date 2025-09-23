@@ -32,13 +32,21 @@ pub struct SlimedropView {
     pub created_at_ms: U64,
     pub created_by: AccountId,
     pub claims: Vec<Claim>,
+    pub status: DropStatus,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+pub enum DropStatus {
+    Active,
+    Cancelled,
 }
 
 const ONE_NEAR: NearToken = NearToken::from_near(1);
 const CONTRACT_INITIAL_BALANCE: NearToken = NearToken::from_near(10);
 
 #[tokio::test]
-async fn test_get_missing_key_panics() -> Result<(), Box<dyn std::error::Error>> {
+async fn test_get_missing_key() -> Result<(), Box<dyn std::error::Error>> {
     let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
     let contract_wasm = near_workspaces::compile_project("./").await?;
     let root = sandbox.root_account()?;
@@ -59,12 +67,12 @@ async fn test_get_missing_key_panics() -> Result<(), Box<dyn std::error::Error>>
     let secret_key = SecretKey::from_random(KeyType::ED25519);
     let public_key = secret_key.public_key();
 
-    // This should fail because the key doesn't exist
+    // Check that key returns None
     let result = contract
         .view("get_key_info")
         .args_json(json!({"key": public_key}))
-        .await;
-    assert!(format!("{:#?}", result.unwrap_err()).contains("Key is missing"));
+        .await?;
+    assert_eq!(result.json::<Option<SlimedropView>>()?, None);
 
     Ok(())
 }
@@ -1419,6 +1427,347 @@ async fn test_get_key_info_with_claims() -> Result<(), Box<dyn std::error::Error
         receiver_account.id().clone()
     );
     assert!(drop_after.claims[0].claimed_at_ms.0 > 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cancel_drop() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
+    let root = sandbox.root_account()?;
+
+    let user_account = root
+        .create_subaccount("user")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract_account = root
+        .create_subaccount("contract")
+        .initial_balance(CONTRACT_INITIAL_BALANCE)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract = contract_account.deploy(&contract_wasm).await?.unwrap();
+
+    // Initialize the contract
+    let result = contract.call("new").transact().await?;
+    assert!(result.is_success());
+
+    let secret_key = SecretKey::from_random(KeyType::ED25519);
+    let public_key = secret_key.public_key();
+
+    // Create a drop
+    let outcome = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key}))
+        .deposit(ONE_NEAR)
+        .transact()
+        .await?;
+    assert!(outcome.is_success());
+
+    // Verify the drop is active
+    let drop_info_before = contract
+        .view("get_key_info")
+        .args_json(json!({"key": public_key}))
+        .await?;
+
+    let drop_before = drop_info_before.json::<SlimedropView>().unwrap();
+    assert_eq!(drop_before.contents.near, ONE_NEAR);
+    assert_eq!(drop_before.created_by, user_account.id().clone());
+    assert!(drop_before.claims.is_empty());
+
+    // Get user's initial balance
+    let initial_balance = user_account.view_account().await?.balance;
+
+    // Cancel the drop
+    let cancel_outcome = user_account
+        .call(contract.id(), "cancel_drop")
+        .args_json(json!({"public_key": public_key}))
+        .transact()
+        .await?;
+
+    assert!(cancel_outcome.is_success());
+
+    // Check that the user's balance increased (got refunded)
+    let final_balance = user_account.view_account().await?.balance;
+    let balance_increase = final_balance.saturating_sub(initial_balance);
+
+    // Allow for some error due to gas costs
+    assert!(
+        ONE_NEAR.checked_sub(balance_increase).unwrap() < NearToken::from_millinear(50),
+        "User should have received the refund"
+    );
+
+    // Verify the drop status is cancelled
+    let drop_info_after = contract
+        .view("get_key_info")
+        .args_json(json!({"key": public_key}))
+        .await?;
+
+    let drop_after = drop_info_after.json::<SlimedropView>().unwrap();
+    assert_eq!(drop_after.status, DropStatus::Cancelled);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cancel_drop_unauthorized() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
+    let root = sandbox.root_account()?;
+
+    let user_account = root
+        .create_subaccount("user")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let other_account = root
+        .create_subaccount("other")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract_account = root
+        .create_subaccount("contract")
+        .initial_balance(CONTRACT_INITIAL_BALANCE)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract = contract_account.deploy(&contract_wasm).await?.unwrap();
+
+    // Initialize the contract
+    let result = contract.call("new").transact().await?;
+    assert!(result.is_success());
+
+    let secret_key = SecretKey::from_random(KeyType::ED25519);
+    let public_key = secret_key.public_key();
+
+    // User creates a drop
+    let outcome = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key}))
+        .deposit(ONE_NEAR)
+        .transact()
+        .await?;
+    assert!(outcome.is_success());
+
+    // Verify the drop exists and is active
+    let drop_info_before = contract
+        .view("get_key_info")
+        .args_json(json!({"key": public_key}))
+        .await?;
+
+    let drop_before = drop_info_before.json::<SlimedropView>().unwrap();
+    assert_eq!(drop_before.contents.near, ONE_NEAR);
+    assert_eq!(drop_before.created_by, user_account.id().clone());
+    assert!(drop_before.claims.is_empty());
+
+    // Try to cancel the drop with a different account - should fail
+    let cancel_outcome = other_account
+        .call(contract.id(), "cancel_drop")
+        .args_json(json!({"public_key": public_key}))
+        .transact()
+        .await?;
+
+    assert!(
+        format!("{:#?}", cancel_outcome.failures()[0])
+            .contains("You can only cancel drops you created")
+    );
+
+    // Verify the drop is still active
+    let drop_info_after = contract
+        .view("get_key_info")
+        .args_json(json!({"key": public_key}))
+        .await?;
+
+    let drop_after = drop_info_after.json::<SlimedropView>().unwrap();
+    assert_eq!(drop_after.status, DropStatus::Active);
+    assert_eq!(drop_after.contents.near, ONE_NEAR);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cancel_drop_already_cancelled() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
+    let root = sandbox.root_account()?;
+
+    let user_account = root
+        .create_subaccount("user")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract_account = root
+        .create_subaccount("contract")
+        .initial_balance(CONTRACT_INITIAL_BALANCE)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract = contract_account.deploy(&contract_wasm).await?.unwrap();
+
+    // Initialize the contract
+    let result = contract.call("new").transact().await?;
+    assert!(result.is_success());
+
+    let secret_key = SecretKey::from_random(KeyType::ED25519);
+    let public_key = secret_key.public_key();
+
+    // Create a drop
+    let outcome = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key}))
+        .deposit(ONE_NEAR)
+        .transact()
+        .await?;
+    assert!(outcome.is_success());
+
+    // Cancel the drop first time
+    let cancel_outcome = user_account
+        .call(contract.id(), "cancel_drop")
+        .args_json(json!({"public_key": public_key}))
+        .transact()
+        .await?;
+    assert!(cancel_outcome.is_success());
+
+    // Verify the drop is cancelled
+    let drop_info = contract
+        .view("get_key_info")
+        .args_json(json!({"key": public_key}))
+        .await?;
+    let drop = drop_info.json::<SlimedropView>().unwrap();
+    assert_eq!(drop.status, DropStatus::Cancelled);
+
+    // Try to cancel the drop again - should fail
+    let second_cancel_outcome = user_account
+        .call(contract.id(), "cancel_drop")
+        .args_json(json!({"public_key": public_key}))
+        .transact()
+        .await?;
+
+    assert!(
+        format!("{:#?}", second_cancel_outcome.failures()[0]).contains("Drop already cancelled")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_cancel_drop_already_claimed() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
+    let root = sandbox.root_account()?;
+
+    let sender_account = root
+        .create_subaccount("sender")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let receiver_account = root
+        .create_subaccount("receiver")
+        .initial_balance(ONE_NEAR)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract_account = root
+        .create_subaccount("contract")
+        .initial_balance(CONTRACT_INITIAL_BALANCE)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract = contract_account.deploy(&contract_wasm).await?.unwrap();
+
+    // Initialize the contract
+    let result = contract.call("new").transact().await?;
+    assert!(result.is_success());
+
+    let secret_key = SecretKey::from_random(KeyType::ED25519);
+    let public_key = secret_key.public_key();
+
+    // Create a drop
+    let outcome = sender_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key}))
+        .deposit(ONE_NEAR)
+        .transact()
+        .await?;
+    assert!(outcome.is_success());
+
+    // Claim the drop first
+    let now = U64(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64);
+    let nonce = now.0.to_be_bytes();
+    let nonce = [vec![0; 32 - nonce.len()], nonce.to_vec()]
+        .concat()
+        .try_into()
+        .unwrap();
+    let message = NEP413Payload {
+        message: format!(
+            "I want to claim this Slimedrop and send it to {}",
+            receiver_account.id()
+        ),
+        nonce,
+        recipient: contract.id().to_string(),
+        callback_url: None,
+    };
+
+    let signer = SecretKeySigner::new(secret_key.to_string().parse().unwrap());
+    let signature = signer
+        .sign_message_nep413(
+            receiver_account.id().clone(),
+            public_key.to_string().parse().unwrap(),
+            message,
+        )
+        .await?;
+    let signature_base64 = Base64VecU8(match signature.to_string().parse::<Signature>().unwrap() {
+        Signature::ED25519(signature) => signature.to_bytes().to_vec(),
+        Signature::SECP256K1(signature) => <[u8; 65] as From<_>>::from(signature).to_vec(),
+    });
+
+    let claim_outcome = receiver_account
+        .call(contract.id(), "claim")
+        .args_json(json!({
+            "signature": signature_base64,
+            "public_key": public_key,
+            "nonce": now,
+        }))
+        .transact()
+        .await?;
+    assert!(claim_outcome.is_success());
+
+    // Verify the drop has been claimed
+    let drop_info = contract
+        .view("get_key_info")
+        .args_json(json!({"key": public_key}))
+        .await?;
+    let drop = drop_info.json::<SlimedropView>().unwrap();
+    assert!(!drop.claims.is_empty());
+
+    // Try to cancel the claimed drop - should fail
+    let cancel_outcome = sender_account
+        .call(contract.id(), "cancel_drop")
+        .args_json(json!({"public_key": public_key}))
+        .transact()
+        .await?;
+
+    assert!(format!("{:#?}", cancel_outcome.failures()[0]).contains("Drop already claimed"));
 
     Ok(())
 }
