@@ -285,7 +285,10 @@ async fn test_drop_claim_for_myself_ed25519() -> Result<(), Box<dyn std::error::
         .try_into()
         .unwrap();
     let message = NEP413Payload {
-        message: "I want to claim this Slimedrop".to_string(),
+        message: format!(
+            "I want to claim this Slimedrop and send it to {}",
+            receiver_account.id()
+        ),
         nonce,
         recipient: contract.id().to_string(),
         callback_url: None,
@@ -391,7 +394,10 @@ async fn test_drop_claim_for_myself_secp256k1() -> Result<(), Box<dyn std::error
         .try_into()
         .unwrap();
     let message = NEP413Payload {
-        message: "I want to claim this Slimedrop".to_string(),
+        message: format!(
+            "I want to claim this Slimedrop and send it to {}",
+            receiver_account.id()
+        ),
         nonce,
         recipient: contract.id().to_string(),
         callback_url: None,

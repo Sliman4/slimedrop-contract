@@ -84,12 +84,9 @@ impl SlimeDrop {
             callback_url: Option<String>,
         }
 
+        let receiver_id = account_id.unwrap_or_else(env::signer_account_id);
         let message = Nep413Message {
-            message: if let Some(account_id) = account_id.as_ref() {
-                format!("I want to claim this Slimedrop and send it to {account_id}")
-            } else {
-                "I want to claim this Slimedrop".to_string()
-            },
+            message: format!("I want to claim this Slimedrop and send it to {receiver_id}"),
             nonce,
             recipient: env::current_account_id().to_string(),
             callback_url,
@@ -129,7 +126,6 @@ impl SlimeDrop {
         };
         require!(verified, "Failed to verify signature");
 
-        let receiver_id = account_id.unwrap_or_else(env::signer_account_id);
         let drop = self
             .accounts
             .remove(&public_key)
