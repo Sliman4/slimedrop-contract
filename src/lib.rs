@@ -81,20 +81,14 @@ impl SlimedropContract {
             env::attached_deposit() > NearToken::from_near(0),
             "Attached deposit must be at least 1 yoctoNEAR"
         );
-        if let Some(drop) = self.accounts.get(&public_key) {
+        if let Some(drop) = self.accounts.get_mut(&public_key) {
             if !drop.claims.is_empty() {
                 env::panic_str("Drop already claimed");
             }
             let contents = DropContents {
                 near: drop.contents.near.saturating_add(env::attached_deposit()),
             };
-            let drop = Slimedrop {
-                contents,
-                created_at_ms: drop.created_at_ms,
-                created_by: drop.created_by.clone(),
-                claims: Vector::new([b"d", public_key.as_bytes()].concat()),
-            };
-            self.accounts.insert(public_key.clone(), drop);
+            drop.contents = contents;
             self.contributed_to
                 .entry(env::predecessor_account_id())
                 .or_insert_with(|| {
