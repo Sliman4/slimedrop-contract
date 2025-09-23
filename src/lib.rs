@@ -3,13 +3,50 @@ use near_sdk::{
     env::{self, sha256},
     json_types::{Base64VecU8, U64},
     near, require,
-    store::LookupMap,
+    store::{IterableMap, LookupMap, Vector},
 };
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
-pub struct SlimeDrop {
-    pub accounts: LookupMap<PublicKey, DropContents>,
+pub struct SlimedropContract {
+    /// Map of all active drops
+    pub accounts: LookupMap<PublicKey, Slimedrop>,
+    /// Map of all drops an account has contributed to
+    pub contributed_to: IterableMap<AccountId, Vector<PublicKey>>,
+}
+
+#[near(serializers=[borsh])]
+pub struct Slimedrop {
+    pub contents: DropContents,
+    pub created_at_ms: U64,
+    pub created_by: AccountId,
+    pub claims: Vector<Claim>,
+}
+
+#[near(serializers=[json])]
+pub struct SlimedropView {
+    pub contents: DropContents,
+    pub created_at_ms: U64,
+    pub created_by: AccountId,
+    pub claims: Vec<Claim>,
+}
+
+impl From<&Slimedrop> for SlimedropView {
+    fn from(drop: &Slimedrop) -> Self {
+        Self {
+            contents: drop.contents.clone(),
+            created_at_ms: drop.created_at_ms,
+            created_by: drop.created_by.clone(),
+            claims: drop.claims.into_iter().cloned().collect(),
+        }
+    }
+}
+
+#[near(serializers=[borsh, json])]
+#[derive(Clone)]
+pub struct Claim {
+    pub account_id: AccountId,
+    pub claimed_at_ms: U64,
 }
 
 #[near(serializers=[borsh, json])]
@@ -27,13 +64,13 @@ impl Default for DropContents {
 }
 
 #[near]
-impl SlimeDrop {
+impl SlimedropContract {
     /// Initializes the contract with an empty map for the accounts
     #[init]
     pub fn new() -> Self {
         Self {
-            #[allow(deprecated)]
             accounts: LookupMap::new(b"a"),
+            contributed_to: IterableMap::new(b"b"),
         }
     }
 
@@ -44,11 +81,43 @@ impl SlimeDrop {
             env::attached_deposit() > NearToken::from_near(0),
             "Attached deposit must be at least 1 yoctoNEAR"
         );
-        let drop = self.accounts.get(&public_key).cloned().unwrap_or_default();
-        let new_value = DropContents {
-            near: drop.near.saturating_add(env::attached_deposit()),
-        };
-        self.accounts.insert(public_key, new_value);
+        if let Some(drop) = self.accounts.get(&public_key) {
+            if !drop.claims.is_empty() {
+                env::panic_str("Drop already claimed");
+            }
+            let contents = DropContents {
+                near: drop.contents.near.saturating_add(env::attached_deposit()),
+            };
+            let drop = Slimedrop {
+                contents,
+                created_at_ms: drop.created_at_ms,
+                created_by: drop.created_by.clone(),
+                claims: Vector::new([b"d", public_key.as_bytes()].concat()),
+            };
+            self.accounts.insert(public_key.clone(), drop);
+            self.contributed_to
+                .entry(env::predecessor_account_id())
+                .or_insert_with(|| {
+                    Vector::new(format!("c{}", env::predecessor_account_id()).as_bytes())
+                })
+                .push(public_key);
+        } else {
+            let drop = Slimedrop {
+                contents: DropContents {
+                    near: env::attached_deposit(),
+                },
+                created_at_ms: U64(env::block_timestamp_ms()),
+                created_by: env::predecessor_account_id(),
+                claims: Vector::new([b"d", public_key.as_bytes()].concat()),
+            };
+            self.accounts.insert(public_key.clone(), drop);
+            self.contributed_to
+                .entry(env::predecessor_account_id())
+                .or_insert_with(|| {
+                    Vector::new(format!("c{}", env::predecessor_account_id()).as_bytes())
+                })
+                .push(public_key);
+        }
     }
 
     /// Claim tokens for specific account that are attached to the public key this tx is signed with.
@@ -84,7 +153,7 @@ impl SlimeDrop {
             callback_url: Option<String>,
         }
 
-        let receiver_id = account_id.unwrap_or_else(env::signer_account_id);
+        let receiver_id = account_id.unwrap_or_else(env::predecessor_account_id);
         let message = Nep413Message {
             message: format!("I want to claim this Slimedrop and send it to {receiver_id}"),
             nonce,
@@ -128,13 +197,40 @@ impl SlimeDrop {
 
         let drop = self
             .accounts
-            .remove(&public_key)
+            .get_mut(&public_key)
             .expect("Unexpected public key");
-        Promise::new(receiver_id).transfer(drop.near)
+        if !drop.claims.is_empty() {
+            env::panic_str("Drop already claimed");
+        }
+        drop.claims.push(Claim {
+            account_id: receiver_id.clone(),
+            claimed_at_ms: U64(current_timestamp_ms),
+        });
+        Promise::new(receiver_id).transfer(drop.contents.near)
     }
 
-    /// Returns the balance associated with given key.
-    pub fn get_key_balance(&self, key: PublicKey) -> DropContents {
-        self.accounts.get(&key).cloned().expect("Key is missing")
+    /// Returns the drop info associated with given key.
+    pub fn get_key_info(&self, key: PublicKey) -> SlimedropView {
+        self.accounts.get(&key).expect("Key is missing").into()
+    }
+
+    /// Returns the drops an account has contributed to.
+    pub fn get_account_drops(
+        &self,
+        account_id: AccountId,
+        skip: Option<U64>,
+        limit: Option<U64>,
+    ) -> Vec<SlimedropView> {
+        let Some(contributed_to) = self.contributed_to.get(&account_id) else {
+            return vec![];
+        };
+        let skip = skip.unwrap_or(U64(0));
+        let limit = limit.unwrap_or(U64(100));
+        contributed_to
+            .iter()
+            .skip(skip.0 as usize)
+            .take(limit.0 as usize)
+            .map(|key| self.accounts.get(key).expect("Key is missing").into())
+            .collect()
     }
 }
