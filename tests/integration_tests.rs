@@ -44,6 +44,7 @@ pub enum DropStatus {
 
 const ONE_NEAR: NearToken = NearToken::from_near(1);
 const CONTRACT_INITIAL_BALANCE: NearToken = NearToken::from_near(10);
+const FLAT_FEE_PER_DROP: NearToken = NearToken::from_millinear(50); // 0.05 NEAR
 
 #[tokio::test]
 async fn test_get_missing_key() -> Result<(), Box<dyn std::error::Error>> {
@@ -123,7 +124,12 @@ async fn test_add_near_and_get_balance() -> Result<(), Box<dyn std::error::Error
         .await?;
 
     let drop_info = drop_info_outcome.json::<SlimedropView>().unwrap();
-    assert_eq!(drop_info.contents, DropContents { near: ONE_NEAR });
+    assert_eq!(
+        drop_info.contents,
+        DropContents {
+            near: ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP)
+        }
+    );
     assert_eq!(drop_info.created_by, user_account.id().clone());
     assert!(drop_info.claims.is_empty());
 
@@ -241,8 +247,9 @@ async fn test_drop_claim_for_someone() -> Result<(), Box<dyn std::error::Error>>
     let balance_increase = final_balance.saturating_sub(initial_balance);
 
     assert_eq!(
-        balance_increase, ONE_NEAR,
-        "Receiver should have received the deposited amount"
+        balance_increase,
+        ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP),
+        "Receiver should have received the deposited amount minus fees"
     );
 
     Ok(())
@@ -349,9 +356,10 @@ async fn test_drop_claim_for_myself_ed25519() -> Result<(), Box<dyn std::error::
     let balance_increase = final_balance.saturating_sub(initial_balance);
 
     // Allow for some error due to gas
+    let expected_amount = ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP);
     assert!(
-        ONE_NEAR.checked_sub(balance_increase).unwrap() < NearToken::from_millinear(5),
-        "Receiver should have received the deposited amount"
+        expected_amount.checked_sub(balance_increase).unwrap() < NearToken::from_millinear(5),
+        "Receiver should have received the deposited amount minus fees"
     );
 
     Ok(())
@@ -458,9 +466,10 @@ async fn test_drop_claim_for_myself_secp256k1() -> Result<(), Box<dyn std::error
     let balance_increase = final_balance.saturating_sub(initial_balance);
 
     // Allow for some error due to gas
+    let expected_amount = ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP);
     assert!(
-        ONE_NEAR.checked_sub(balance_increase).unwrap() < NearToken::from_millinear(5),
-        "Receiver should have received the deposited amount"
+        expected_amount.checked_sub(balance_increase).unwrap() < NearToken::from_millinear(5),
+        "Receiver should have received the deposited amount minus fees"
     );
 
     Ok(())
@@ -891,7 +900,12 @@ async fn test_send_two_times() -> Result<(), Box<dyn std::error::Error>> {
     let drop_info = drop_info_after_first_outcome
         .json::<SlimedropView>()
         .unwrap();
-    assert_eq!(drop_info.contents, DropContents { near: ONE_NEAR });
+    assert_eq!(
+        drop_info.contents,
+        DropContents {
+            near: ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP)
+        }
+    );
     assert_eq!(drop_info.created_by, user_account.id().clone());
     assert!(drop_info.claims.is_empty());
 
@@ -911,7 +925,10 @@ async fn test_send_two_times() -> Result<(), Box<dyn std::error::Error>> {
         .args_json(json!({"key": public_key}))
         .await?;
 
-    let expected_total = ONE_NEAR.saturating_add(additional_deposit);
+    // Should only charge the fee once
+    let expected_total = ONE_NEAR
+        .saturating_sub(FLAT_FEE_PER_DROP)
+        .saturating_add(additional_deposit);
     let drop_info = drop_info_after_second_outcome
         .json::<SlimedropView>()
         .unwrap();
@@ -956,17 +973,17 @@ async fn test_add_near_requires_deposit() -> Result<(), Box<dyn std::error::Erro
     let secret_key = SecretKey::from_random(KeyType::ED25519);
     let public_key = secret_key.public_key();
 
-    // Try to create a drop without any deposit - should fail
+    // Try to create a drop with insufficient deposit - should fail
     let result = user_account
         .call(contract.id(), "add_near")
         .args_json(json!({"public_key": public_key}))
-        .deposit(NearToken::from_near(0)) // no deposit
+        .deposit(NearToken::from_millinear(30)) // less than required fee
         .transact()
         .await;
 
     assert!(
         format!("{:#?}", result.unwrap().failures()[0])
-            .contains("Attached deposit must be at least 1 yoctoNEAR"),
+            .contains("Attached deposit must be greater than"),
     );
 
     Ok(())
@@ -1035,13 +1052,19 @@ async fn test_get_account_drops() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check first drop
     assert_eq!(drops[0].0, public_key1);
-    assert_eq!(drops[0].1.contents.near, ONE_NEAR);
+    assert_eq!(
+        drops[0].1.contents.near,
+        ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP)
+    );
     assert_eq!(drops[0].1.created_by, user_account.id().clone());
     assert!(drops[0].1.claims.is_empty());
 
     // Check second drop
     assert_eq!(drops[1].0, public_key2);
-    assert_eq!(drops[1].1.contents.near, ONE_NEAR.saturating_mul(2));
+    assert_eq!(
+        drops[1].1.contents.near,
+        ONE_NEAR.saturating_mul(2).saturating_sub(FLAT_FEE_PER_DROP)
+    );
     assert_eq!(drops[1].1.created_by, user_account.id().clone());
     assert!(drops[1].1.claims.is_empty());
 
@@ -1372,7 +1395,10 @@ async fn test_get_key_info_with_claims() -> Result<(), Box<dyn std::error::Error
         .await?;
 
     let drop_before = drop_info_before.json::<SlimedropView>().unwrap();
-    assert_eq!(drop_before.contents.near, ONE_NEAR);
+    assert_eq!(
+        drop_before.contents.near,
+        ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP)
+    );
     assert_eq!(drop_before.created_by, sender_account.id().clone());
     assert!(drop_before.claims.is_empty());
 
@@ -1427,7 +1453,10 @@ async fn test_get_key_info_with_claims() -> Result<(), Box<dyn std::error::Error
         .await?;
 
     let drop_after = drop_info_after.json::<SlimedropView>().unwrap();
-    assert_eq!(drop_after.contents.near, ONE_NEAR);
+    assert_eq!(
+        drop_after.contents.near,
+        ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP)
+    );
     assert_eq!(drop_after.created_by, sender_account.id().clone());
     assert_eq!(drop_after.claims.len(), 1);
     assert!(drop_after.claims.contains_key(receiver_account.id()));
@@ -1482,7 +1511,10 @@ async fn test_cancel_drop() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let drop_before = drop_info_before.json::<SlimedropView>().unwrap();
-    assert_eq!(drop_before.contents.near, ONE_NEAR);
+    assert_eq!(
+        drop_before.contents.near,
+        ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP)
+    );
     assert_eq!(drop_before.created_by, user_account.id().clone());
     assert!(drop_before.claims.is_empty());
 
@@ -1502,10 +1534,11 @@ async fn test_cancel_drop() -> Result<(), Box<dyn std::error::Error>> {
     let final_balance = user_account.view_account().await?.balance;
     let balance_increase = final_balance.saturating_sub(initial_balance);
 
-    // Allow for some error due to gas costs
+    // Allow for some error due to gas costs - user gets back the drop amount, not the fee
+    let expected_refund = ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP);
     assert!(
-        ONE_NEAR.checked_sub(balance_increase).unwrap() < NearToken::from_millinear(50),
-        "User should have received the refund"
+        expected_refund.checked_sub(balance_increase).unwrap() < NearToken::from_millinear(50),
+        "User should have received the refund (without the fee)"
     );
 
     // Verify the drop status is cancelled
@@ -1572,7 +1605,10 @@ async fn test_cancel_drop_unauthorized() -> Result<(), Box<dyn std::error::Error
         .await?;
 
     let drop_before = drop_info_before.json::<SlimedropView>().unwrap();
-    assert_eq!(drop_before.contents.near, ONE_NEAR);
+    assert_eq!(
+        drop_before.contents.near,
+        ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP)
+    );
     assert_eq!(drop_before.created_by, user_account.id().clone());
     assert!(drop_before.claims.is_empty());
 
@@ -1596,7 +1632,10 @@ async fn test_cancel_drop_unauthorized() -> Result<(), Box<dyn std::error::Error
 
     let drop_after = drop_info_after.json::<SlimedropView>().unwrap();
     assert_eq!(drop_after.status, DropStatus::Active);
-    assert_eq!(drop_after.contents.near, ONE_NEAR);
+    assert_eq!(
+        drop_after.contents.near,
+        ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP)
+    );
 
     Ok(())
 }
@@ -1960,14 +1999,20 @@ async fn test_get_account_claimed_drops() -> Result<(), Box<dyn std::error::Erro
 
     // Verify first claimed drop
     assert_eq!(claimed_drops[0].0, public_key1);
-    assert_eq!(claimed_drops[0].1.contents.near, ONE_NEAR);
+    assert_eq!(
+        claimed_drops[0].1.contents.near,
+        ONE_NEAR.saturating_sub(FLAT_FEE_PER_DROP)
+    );
     assert_eq!(claimed_drops[0].1.created_by, sender_account.id().clone());
     assert_eq!(claimed_drops[0].1.claims.len(), 1);
     assert!(claimed_drops[0].1.claims.contains_key(claimer_account.id()));
 
     // Verify second claimed drop
     assert_eq!(claimed_drops[1].0, public_key2);
-    assert_eq!(claimed_drops[1].1.contents.near, ONE_NEAR.saturating_mul(2));
+    assert_eq!(
+        claimed_drops[1].1.contents.near,
+        ONE_NEAR.saturating_mul(2).saturating_sub(FLAT_FEE_PER_DROP)
+    );
     assert_eq!(claimed_drops[1].1.created_by, sender_account.id().clone());
     assert_eq!(claimed_drops[1].1.claims.len(), 1);
     assert!(claimed_drops[1].1.claims.contains_key(claimer_account.id()));
@@ -2032,6 +2077,337 @@ async fn test_get_account_claimed_drops() -> Result<(), Box<dyn std::error::Erro
         .json::<Vec<(PublicKey, SlimedropView)>>()
         .unwrap();
     assert!(empty_claimed_drops.is_empty());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fee_collection_on_drop_creation() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
+    let root = sandbox.root_account()?;
+
+    let user_account = root
+        .create_subaccount("user")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract_account = root
+        .create_subaccount("contract")
+        .initial_balance(CONTRACT_INITIAL_BALANCE)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract = contract_account.deploy(&contract_wasm).await?.unwrap();
+
+    // Initialize the contract
+    let result = contract.call("new").transact().await?;
+    assert!(result.is_success());
+
+    // Create multiple drops to accumulate fees
+    let secret_key1 = SecretKey::from_random(KeyType::ED25519);
+    let public_key1 = secret_key1.public_key();
+    let secret_key2 = SecretKey::from_random(KeyType::ED25519);
+    let public_key2 = secret_key2.public_key();
+
+    // Create first drop
+    let outcome1 = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key1}))
+        .deposit(ONE_NEAR)
+        .transact()
+        .await?;
+    assert!(outcome1.is_success());
+
+    // Create second drop
+    let outcome2 = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key2}))
+        .deposit(ONE_NEAR.saturating_mul(2))
+        .transact()
+        .await?;
+    assert!(outcome2.is_success());
+
+    // Verify fees are collected correctly by checking contract balance
+    let contract_balance = contract_account.view_account().await?.balance;
+    let expected_fee_income = FLAT_FEE_PER_DROP.saturating_mul(2);
+
+    // The contract should have gained fees from both drops
+    assert!(
+        contract_balance >= CONTRACT_INITIAL_BALANCE.saturating_add(expected_fee_income),
+        "Contract should have collected fees from drop creation"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_insufficient_deposit_for_new_drop() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
+    let root = sandbox.root_account()?;
+
+    let user_account = root
+        .create_subaccount("user")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract_account = root
+        .create_subaccount("contract")
+        .initial_balance(CONTRACT_INITIAL_BALANCE)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract = contract_account.deploy(&contract_wasm).await?.unwrap();
+
+    // Initialize the contract
+    let result = contract.call("new").transact().await?;
+    assert!(result.is_success());
+
+    let secret_key = SecretKey::from_random(KeyType::ED25519);
+    let public_key = secret_key.public_key();
+
+    // Try to create a drop with deposit exactly equal to fee (should fail)
+    let result = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key}))
+        .deposit(FLAT_FEE_PER_DROP)
+        .transact()
+        .await;
+
+    assert!(
+        format!("{:#?}", result.unwrap().failures()[0])
+            .contains("Attached deposit must be greater than"),
+    );
+
+    // Try with less than fee (should also fail)
+    let result2 = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key}))
+        .deposit(FLAT_FEE_PER_DROP.saturating_sub(NearToken::from_yoctonear(1)))
+        .transact()
+        .await;
+
+    assert!(
+        format!("{:#?}", result2.unwrap().failures()[0])
+            .contains("Attached deposit must be greater than"),
+    );
+
+    Ok(())
+}
+#[tokio::test]
+async fn test_withdraw_fees() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
+    let root = sandbox.root_account()?;
+
+    let user_account = root
+        .create_subaccount("user")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let withdrawal_account = root
+        .create_subaccount("withdrawal")
+        .initial_balance(ONE_NEAR)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract_account = root
+        .create_subaccount("contract")
+        .initial_balance(CONTRACT_INITIAL_BALANCE)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract = contract_account.deploy(&contract_wasm).await?.unwrap();
+
+    // Initialize the contract
+    let result = contract.call("new").transact().await?;
+    assert!(result.is_success());
+
+    // Create some drops to accumulate fees
+    let secret_key1 = SecretKey::from_random(KeyType::ED25519);
+    let public_key1 = secret_key1.public_key();
+    let secret_key2 = SecretKey::from_random(KeyType::ED25519);
+    let public_key2 = secret_key2.public_key();
+
+    // Create first drop
+    let outcome1 = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key1}))
+        .deposit(ONE_NEAR)
+        .transact()
+        .await?;
+    assert!(outcome1.is_success());
+
+    // Create second drop
+    let outcome2 = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key2}))
+        .deposit(ONE_NEAR.saturating_mul(2))
+        .transact()
+        .await?;
+    assert!(outcome2.is_success());
+
+    // Get withdrawal account initial balance
+    let initial_withdrawal_balance = withdrawal_account.view_account().await?.balance;
+
+    // Withdraw fees (can only be called by the contract itself, so we use the contract account)
+    let withdraw_outcome = contract_account
+        .call(contract.id(), "withdraw_fees")
+        .args_json(json!({"withdraw_to": withdrawal_account.id()}))
+        .transact()
+        .await?;
+
+    assert!(withdraw_outcome.is_success());
+
+    // Check that withdrawal account received the fees
+    let final_withdrawal_balance = withdrawal_account.view_account().await?.balance;
+    let balance_increase = final_withdrawal_balance.saturating_sub(initial_withdrawal_balance);
+    let expected_fees = FLAT_FEE_PER_DROP.saturating_mul(2);
+
+    assert_eq!(
+        balance_increase, expected_fees,
+        "Withdrawal account should receive all accumulated fees"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_withdraw_fees_unauthorized() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
+    let root = sandbox.root_account()?;
+
+    let user_account = root
+        .create_subaccount("user")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let unauthorized_account = root
+        .create_subaccount("unauthorized")
+        .initial_balance(ONE_NEAR)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract_account = root
+        .create_subaccount("contract")
+        .initial_balance(CONTRACT_INITIAL_BALANCE)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract = contract_account.deploy(&contract_wasm).await?.unwrap();
+
+    // Initialize the contract
+    let result = contract.call("new").transact().await?;
+    assert!(result.is_success());
+
+    // Create a drop to accumulate some fees
+    let secret_key = SecretKey::from_random(KeyType::ED25519);
+    let public_key = secret_key.public_key();
+
+    let outcome = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key}))
+        .deposit(ONE_NEAR)
+        .transact()
+        .await?;
+    assert!(outcome.is_success());
+
+    // Try to withdraw fees from unauthorized account (should fail because method is #[private])
+    let withdraw_outcome = unauthorized_account
+        .call(contract.id(), "withdraw_fees")
+        .args_json(json!({"withdraw_to": unauthorized_account.id()}))
+        .transact()
+        .await?;
+
+    // The method should fail because it's marked as #[private]
+    assert!(!withdraw_outcome.is_success());
+    let error_message = format!("{:#?}", withdraw_outcome.failures()[0]);
+    assert!(
+        error_message.contains("Method withdraw_fees is private"),
+        "Expected private method error, got: {}",
+        error_message
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_withdraw_fees_twice() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
+    let root = sandbox.root_account()?;
+
+    let user_account = root
+        .create_subaccount("user")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let withdrawal_account = root
+        .create_subaccount("withdrawal")
+        .initial_balance(ONE_NEAR)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract_account = root
+        .create_subaccount("contract")
+        .initial_balance(CONTRACT_INITIAL_BALANCE)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract = contract_account.deploy(&contract_wasm).await?.unwrap();
+
+    // Initialize the contract
+    let result = contract.call("new").transact().await?;
+    assert!(result.is_success());
+
+    // Create a drop to accumulate fees
+    let secret_key = SecretKey::from_random(KeyType::ED25519);
+    let public_key = secret_key.public_key();
+
+    let outcome = user_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key}))
+        .deposit(ONE_NEAR)
+        .transact()
+        .await?;
+    assert!(outcome.is_success());
+
+    // First withdrawal should succeed
+    let withdraw_outcome1 = contract_account
+        .call(contract.id(), "withdraw_fees")
+        .args_json(json!({"withdraw_to": withdrawal_account.id()}))
+        .transact()
+        .await?;
+    assert!(withdraw_outcome1.is_success());
+
+    // Second withdrawal should fail (no fees left)
+    let withdraw_outcome2 = contract_account
+        .call(contract.id(), "withdraw_fees")
+        .args_json(json!({"withdraw_to": withdrawal_account.id()}))
+        .transact()
+        .await?;
+
+    assert!(format!("{:#?}", withdraw_outcome2.failures()[0]).contains("No fees to withdraw"),);
 
     Ok(())
 }

@@ -10,16 +10,16 @@ use near_sdk::{
 };
 
 macro_rules! require {
-    (let $p: pat = $e:expr, $message:expr $(,)?) => {
+    (let $p: pat = $e:expr, $message:literal $(, $fmt_args:expr)* $(,)?) => {
         let $p = $e else {
-            $crate::env::panic_str(&$message)
+            $crate::env::panic_str(&format!($message, $($fmt_args),*))
         };
     };
-    ($cond:expr, $message:expr $(,)?) => {
+    ($cond:expr, $message:literal $(, $fmt_args:expr)* $(,)?) => {
         if cfg!(debug_assertions) {
-            assert!($cond, "{}", &$message)
+            assert!($cond, $message, $($fmt_args),*)
         } else if !$cond {
-            $crate::env::panic_str(&$message)
+            $crate::env::panic_str(&format!($message, $($fmt_args),*))
         }
     };
 }
@@ -46,6 +46,8 @@ pub enum SlimedropEvent {
     DropCancelled { public_key: PublicKey },
 }
 
+const FLAT_FEE_PER_DROP: NearToken = NearToken::from_millinear(50); // 0.05 NEAR
+
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct SlimedropContract {
@@ -55,6 +57,10 @@ pub struct SlimedropContract {
     pub drops_owned_by_account: IterableMap<AccountId, Vector<PublicKey>>,
     /// Map of all drops an account has claimed
     pub drops_claimed_by_account: IterableMap<AccountId, Vector<PublicKey>>,
+    /// Fees available to withdraw
+    pub fees_earned: NearToken,
+    /// Total fees collected
+    pub fees_total: NearToken,
 }
 
 #[near(serializers=[borsh])]
@@ -138,6 +144,8 @@ impl SlimedropContract {
             drops: LookupMap::new(DropStorageKey::Drops),
             drops_owned_by_account: IterableMap::new(DropStorageKey::DropsOwnedByAccount),
             drops_claimed_by_account: IterableMap::new(DropStorageKey::DropsClaimedByAccount),
+            fees_earned: NearToken::from_near(0),
+            fees_total: NearToken::from_near(0),
         }
     }
 
@@ -145,11 +153,11 @@ impl SlimedropContract {
     /// exists, it will add to the existing balance.
     #[payable]
     pub fn add_near(&mut self, public_key: PublicKey) {
-        require!(
-            env::attached_deposit() > NearToken::from_near(0),
-            "Attached deposit must be at least 1 yoctoNEAR"
-        );
         if let Some(drop) = self.drops.get_mut(&public_key) {
+            require!(
+                !env::attached_deposit().is_zero(),
+                "Attached deposit must be greater than 0",
+            );
             require!(
                 drop.created_by == env::predecessor_account_id(),
                 "You can only add NEAR to drops you created"
@@ -169,9 +177,17 @@ impl SlimedropContract {
             .emit();
             drop.contents = contents;
         } else {
+            require!(
+                env::attached_deposit() > FLAT_FEE_PER_DROP,
+                "Attached deposit must be greater than {FLAT_FEE_PER_DROP} to create a new drop",
+            );
+            self.fees_earned = self.fees_earned.saturating_add(FLAT_FEE_PER_DROP);
+            self.fees_total = self.fees_total.saturating_add(FLAT_FEE_PER_DROP);
             let drop = Slimedrop {
                 contents: DropContents {
-                    near: env::attached_deposit(),
+                    near: env::attached_deposit()
+                        .checked_sub(FLAT_FEE_PER_DROP)
+                        .unwrap_or_else(|| env::panic_str("Attached deposit must be greater than {FLAT_FEE_PER_DROP} to create a new drop")),
                 },
                 created_at_ms: U64(env::block_timestamp_ms()),
                 created_by: env::predecessor_account_id(),
@@ -392,6 +408,15 @@ impl SlimedropContract {
                 )
             })
             .collect()
+    }
+
+    /// Withdraws fees to the given account.
+    #[private]
+    pub fn withdraw_fees(&mut self, withdraw_to: AccountId) -> Promise {
+        let near_to_withdraw = self.fees_earned;
+        require!(!near_to_withdraw.is_zero(), "No fees to withdraw",);
+        self.fees_earned = NearToken::from_near(0);
+        Promise::new(withdraw_to).transfer(near_to_withdraw)
     }
 }
 
