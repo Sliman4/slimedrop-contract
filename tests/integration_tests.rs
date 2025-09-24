@@ -1779,3 +1779,267 @@ async fn test_cancel_drop_already_claimed() -> Result<(), Box<dyn std::error::Er
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_get_account_claimed_drops() -> Result<(), Box<dyn std::error::Error>> {
+    let sandbox = near_workspaces::sandbox_with_version("2.8.0").await?;
+    let contract_wasm = near_workspaces::compile_project("./").await?;
+    let root = sandbox.root_account()?;
+
+    let sender_account = root
+        .create_subaccount("sender")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let claimer_account = root
+        .create_subaccount("claimer")
+        .initial_balance(ONE_NEAR.saturating_mul(10))
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract_account = root
+        .create_subaccount("contract")
+        .initial_balance(CONTRACT_INITIAL_BALANCE)
+        .transact()
+        .await?
+        .unwrap();
+
+    let contract = contract_account.deploy(&contract_wasm).await?.unwrap();
+
+    // Initialize the contract
+    let result = contract.call("new").transact().await?;
+    assert!(result.is_success());
+
+    // Create multiple drops
+    let secret_key1 = SecretKey::from_random(KeyType::ED25519);
+    let public_key1 = secret_key1.public_key();
+    let secret_key2 = SecretKey::from_random(KeyType::ED25519);
+    let public_key2 = secret_key2.public_key();
+    let secret_key3 = SecretKey::from_random(KeyType::ED25519);
+    let public_key3 = secret_key3.public_key();
+
+    // Create first drop
+    let outcome1 = sender_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key1}))
+        .deposit(ONE_NEAR)
+        .transact()
+        .await?;
+    assert!(outcome1.is_success());
+
+    // Create second drop
+    let outcome2 = sender_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key2}))
+        .deposit(ONE_NEAR.saturating_mul(2))
+        .transact()
+        .await?;
+    assert!(outcome2.is_success());
+
+    // Create third drop (this one won't be claimed)
+    let outcome3 = sender_account
+        .call(contract.id(), "add_near")
+        .args_json(json!({"public_key": public_key3}))
+        .deposit(ONE_NEAR.saturating_mul(3))
+        .transact()
+        .await?;
+    assert!(outcome3.is_success());
+
+    // Check that claimer has no claimed drops initially
+    let initial_claimed_drops = contract
+        .view("get_account_claimed_drops")
+        .args_json(json!({"account_id": claimer_account.id()}))
+        .await?;
+
+    let initial_drops = initial_claimed_drops
+        .json::<Vec<(PublicKey, SlimedropView)>>()
+        .unwrap();
+    assert!(initial_drops.is_empty());
+
+    // Claim first drop
+    let now1 = U64(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64);
+    let nonce1 = now1.0.to_be_bytes();
+    let nonce1 = [vec![0; 32 - nonce1.len()], nonce1.to_vec()]
+        .concat()
+        .try_into()
+        .unwrap();
+    let message1 = NEP413Payload {
+        message: format!(
+            "I want to claim this Slimedrop and send it to {}",
+            claimer_account.id()
+        ),
+        nonce: nonce1,
+        recipient: contract.id().to_string(),
+        callback_url: None,
+    };
+
+    let signer1 = SecretKeySigner::new(secret_key1.to_string().parse().unwrap());
+    let signature1 = signer1
+        .sign_message_nep413(
+            claimer_account.id().clone(),
+            public_key1.to_string().parse().unwrap(),
+            message1,
+        )
+        .await?;
+    let signature1_base64 =
+        Base64VecU8(match signature1.to_string().parse::<Signature>().unwrap() {
+            Signature::ED25519(signature) => signature.to_bytes().to_vec(),
+            Signature::SECP256K1(signature) => <[u8; 65] as From<_>>::from(signature).to_vec(),
+        });
+
+    let claim_outcome1 = claimer_account
+        .call(contract.id(), "claim")
+        .args_json(json!({
+            "signature": signature1_base64,
+            "public_key": public_key1,
+            "nonce": now1,
+        }))
+        .transact()
+        .await?;
+    assert!(claim_outcome1.is_success());
+
+    // Claim second drop
+    let now2 = U64(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64);
+    let nonce2 = now2.0.to_be_bytes();
+    let nonce2 = [vec![0; 32 - nonce2.len()], nonce2.to_vec()]
+        .concat()
+        .try_into()
+        .unwrap();
+    let message2 = NEP413Payload {
+        message: format!(
+            "I want to claim this Slimedrop and send it to {}",
+            claimer_account.id()
+        ),
+        nonce: nonce2,
+        recipient: contract.id().to_string(),
+        callback_url: None,
+    };
+
+    let signer2 = SecretKeySigner::new(secret_key2.to_string().parse().unwrap());
+    let signature2 = signer2
+        .sign_message_nep413(
+            claimer_account.id().clone(),
+            public_key2.to_string().parse().unwrap(),
+            message2,
+        )
+        .await?;
+    let signature2_base64 =
+        Base64VecU8(match signature2.to_string().parse::<Signature>().unwrap() {
+            Signature::ED25519(signature) => signature.to_bytes().to_vec(),
+            Signature::SECP256K1(signature) => <[u8; 65] as From<_>>::from(signature).to_vec(),
+        });
+
+    let claim_outcome2 = claimer_account
+        .call(contract.id(), "claim")
+        .args_json(json!({
+            "signature": signature2_base64,
+            "public_key": public_key2,
+            "nonce": now2,
+        }))
+        .transact()
+        .await?;
+    assert!(claim_outcome2.is_success());
+
+    // Get all claimed drops
+    let claimed_drops_outcome = contract
+        .view("get_account_claimed_drops")
+        .args_json(json!({"account_id": claimer_account.id()}))
+        .await?;
+
+    let claimed_drops = claimed_drops_outcome
+        .json::<Vec<(PublicKey, SlimedropView)>>()
+        .unwrap();
+    assert_eq!(claimed_drops.len(), 2);
+
+    // Verify first claimed drop
+    assert_eq!(claimed_drops[0].0, public_key1);
+    assert_eq!(claimed_drops[0].1.contents.near, ONE_NEAR);
+    assert_eq!(claimed_drops[0].1.created_by, sender_account.id().clone());
+    assert_eq!(claimed_drops[0].1.claims.len(), 1);
+    assert_eq!(
+        claimed_drops[0].1.claims[0].account_id,
+        claimer_account.id().clone()
+    );
+
+    // Verify second claimed drop
+    assert_eq!(claimed_drops[1].0, public_key2);
+    assert_eq!(claimed_drops[1].1.contents.near, ONE_NEAR.saturating_mul(2));
+    assert_eq!(claimed_drops[1].1.created_by, sender_account.id().clone());
+    assert_eq!(claimed_drops[1].1.claims.len(), 1);
+    assert_eq!(
+        claimed_drops[1].1.claims[0].account_id,
+        claimer_account.id().clone()
+    );
+
+    // Test pagination with limit
+    let limited_drops_outcome = contract
+        .view("get_account_claimed_drops")
+        .args_json(json!({
+            "account_id": claimer_account.id(),
+            "skip": 0.to_string(),
+            "limit": 1.to_string()
+        }))
+        .await?;
+
+    let limited_drops = limited_drops_outcome
+        .json::<Vec<(PublicKey, SlimedropView)>>()
+        .unwrap();
+    assert_eq!(limited_drops.len(), 1);
+    assert_eq!(limited_drops[0].0, public_key1);
+
+    // Test pagination with skip
+    let skipped_drops_outcome = contract
+        .view("get_account_claimed_drops")
+        .args_json(json!({
+            "account_id": claimer_account.id(),
+            "skip": 1.to_string(),
+            "limit": 1.to_string()
+        }))
+        .await?;
+
+    let skipped_drops = skipped_drops_outcome
+        .json::<Vec<(PublicKey, SlimedropView)>>()
+        .unwrap();
+    assert_eq!(skipped_drops.len(), 1);
+    assert_eq!(skipped_drops[0].0, public_key2);
+
+    // Test for account with no claimed drops (sender should have 0 claims)
+    let sender_claimed_drops_outcome = contract
+        .view("get_account_claimed_drops")
+        .args_json(json!({"account_id": sender_account.id()}))
+        .await?;
+
+    let sender_claimed_drops = sender_claimed_drops_outcome
+        .json::<Vec<(PublicKey, SlimedropView)>>()
+        .unwrap();
+    assert!(sender_claimed_drops.is_empty());
+
+    // Test for completely new account with no claimed drops
+    let empty_account = root
+        .create_subaccount("empty")
+        .initial_balance(ONE_NEAR)
+        .transact()
+        .await?
+        .unwrap();
+
+    let empty_claimed_drops_outcome = contract
+        .view("get_account_claimed_drops")
+        .args_json(json!({"account_id": empty_account.id()}))
+        .await?;
+
+    let empty_claimed_drops = empty_claimed_drops_outcome
+        .json::<Vec<(PublicKey, SlimedropView)>>()
+        .unwrap();
+    assert!(empty_claimed_drops.is_empty());
+
+    Ok(())
+}

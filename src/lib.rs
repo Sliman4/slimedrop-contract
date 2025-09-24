@@ -28,6 +28,8 @@ pub struct SlimedropContract {
     pub drops: LookupMap<PublicKey, Slimedrop>,
     /// Map of all drops an account has created
     pub drops_owned_by_account: IterableMap<AccountId, Vector<PublicKey>>,
+    /// Map of all drops an account has claimed
+    pub drops_claimed_by_account: IterableMap<AccountId, Vector<PublicKey>>,
 }
 
 #[near(serializers=[borsh])]
@@ -35,6 +37,7 @@ pub struct Slimedrop {
     pub contents: DropContents,
     pub created_at_ms: U64,
     pub created_by: AccountId,
+    // Replace with LookupSet<Claim> next migration
     pub claims: Vector<Claim>,
     pub status: DropStatus,
 }
@@ -88,14 +91,23 @@ impl Default for DropContents {
     }
 }
 
+// Replace with borsh storage key enum next migration
+const DROPS_PREFIX: &[u8] = b"a";
+const DROPS_OWNED_BY_ACCOUNT_PREFIX: &[u8] = b"b";
+const DROPS_OWNED_BY_ACCOUNT_VECTOR_PREFIX: &[u8] = b"c";
+const DROP_CLAIMS_PREFIX: &[u8] = b"d";
+const DROPS_CLAIMED_BY_ACCOUNT_PREFIX: &[u8] = b"e";
+const DROPS_CLAIMED_BY_ACCOUNT_VECTOR_PREFIX: &[u8] = b"f";
+
 #[near]
 impl SlimedropContract {
     /// Initializes the contract with an empty map for the accounts
     #[init]
     pub fn new() -> Self {
         Self {
-            drops: LookupMap::new(b"a"),
-            drops_owned_by_account: IterableMap::new(b"b"),
+            drops: LookupMap::new(DROPS_PREFIX),
+            drops_owned_by_account: IterableMap::new(DROPS_OWNED_BY_ACCOUNT_PREFIX),
+            drops_claimed_by_account: IterableMap::new(DROPS_CLAIMED_BY_ACCOUNT_PREFIX),
         }
     }
 
@@ -128,14 +140,20 @@ impl SlimedropContract {
                 },
                 created_at_ms: U64(env::block_timestamp_ms()),
                 created_by: env::predecessor_account_id(),
-                claims: Vector::new([b"d", public_key.as_bytes()].concat()),
+                claims: Vector::new([DROP_CLAIMS_PREFIX, public_key.as_bytes()].concat()),
                 status: DropStatus::Active,
             };
             self.drops.insert(public_key.clone(), drop);
             self.drops_owned_by_account
                 .entry(env::predecessor_account_id())
                 .or_insert_with(|| {
-                    Vector::new(format!("c{}", env::predecessor_account_id()).as_bytes())
+                    Vector::new(
+                        [
+                            DROPS_OWNED_BY_ACCOUNT_VECTOR_PREFIX,
+                            env::predecessor_account_id().as_bytes(),
+                        ]
+                        .concat(),
+                    )
                 })
                 .push(public_key);
         }
@@ -221,11 +239,29 @@ impl SlimedropContract {
             "Unexpected public key",
         );
         require!(drop.claims.is_empty(), "Drop already claimed");
+        require!(
+            drop.claims
+                .iter()
+                .all(|claim| claim.account_id != receiver_id),
+            "Drop already claimed by this account"
+        );
         require!(drop.status == DropStatus::Active, "Drop is not active");
         drop.claims.push(Claim {
             account_id: receiver_id.clone(),
             claimed_at_ms: U64(current_timestamp_ms),
         });
+        self.drops_claimed_by_account
+            .entry(receiver_id.clone())
+            .or_insert_with(|| {
+                Vector::new(
+                    [
+                        DROPS_CLAIMED_BY_ACCOUNT_VECTOR_PREFIX,
+                        receiver_id.as_bytes(),
+                    ]
+                    .concat(),
+                )
+            })
+            .push(public_key);
         send_drop(drop, receiver_id)
     }
 
@@ -262,6 +298,7 @@ impl SlimedropContract {
             .collect()
     }
 
+    /// Cancels a drop and refunds the contents to the creator.
     pub fn cancel_drop(&mut self, public_key: PublicKey) -> Promise {
         require!(let Some(drop) = self.drops.get_mut(&public_key), "Key is missing");
         require!(
@@ -272,6 +309,34 @@ impl SlimedropContract {
         require!(drop.claims.is_empty(), "Drop already claimed");
         drop.status = DropStatus::Cancelled;
         send_drop(drop, drop.created_by.clone())
+    }
+
+    /// Returns the drops an account has claimed.
+    pub fn get_account_claimed_drops(
+        &self,
+        account_id: AccountId,
+        skip: Option<U64>,
+        limit: Option<U64>,
+    ) -> Vec<(PublicKey, SlimedropView)> {
+        let Some(drops_claimed_by_account) = self.drops_claimed_by_account.get(&account_id) else {
+            return vec![];
+        };
+        let skip = skip.unwrap_or(U64(0));
+        let limit = limit.unwrap_or(U64(100));
+        drops_claimed_by_account
+            .iter()
+            .skip(skip.0 as usize)
+            .take(limit.0 as usize)
+            .map(|key| {
+                (
+                    key.clone(),
+                    self.drops
+                        .get(key)
+                        .unwrap_or_else(|| env::panic_str("Key is missing"))
+                        .into(),
+                )
+            })
+            .collect()
     }
 }
 
