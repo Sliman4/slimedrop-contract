@@ -21,6 +21,28 @@ macro_rules! require {
     };
 }
 
+#[near(event_json(standard = "slimedrop"))]
+pub enum SlimedropEvent {
+    #[event_version("1.0.0")]
+    DropCreated {
+        public_key: PublicKey,
+        contents: DropContents,
+        created_by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    DropUpdated {
+        public_key: PublicKey,
+        contents: DropContents,
+    },
+    #[event_version("1.0.0")]
+    DropClaimed {
+        public_key: PublicKey,
+        claimed_by: AccountId,
+    },
+    #[event_version("1.0.0")]
+    DropCancelled { public_key: PublicKey },
+}
+
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct SlimedropContract {
@@ -132,6 +154,11 @@ impl SlimedropContract {
             let contents = DropContents {
                 near: drop.contents.near.saturating_add(env::attached_deposit()),
             };
+            SlimedropEvent::DropUpdated {
+                public_key,
+                contents: contents.clone(),
+            }
+            .emit();
             drop.contents = contents;
         } else {
             let drop = Slimedrop {
@@ -155,7 +182,15 @@ impl SlimedropContract {
                         .concat(),
                     )
                 })
-                .push(public_key);
+                .push(public_key.clone());
+            SlimedropEvent::DropCreated {
+                public_key,
+                contents: DropContents {
+                    near: env::attached_deposit(),
+                },
+                created_by: env::predecessor_account_id(),
+            }
+            .emit();
         }
     }
 
@@ -261,7 +296,12 @@ impl SlimedropContract {
                     .concat(),
                 )
             })
-            .push(public_key);
+            .push(public_key.clone());
+        SlimedropEvent::DropClaimed {
+            public_key,
+            claimed_by: receiver_id.clone(),
+        }
+        .emit();
         send_drop(drop, receiver_id)
     }
 
@@ -308,6 +348,7 @@ impl SlimedropContract {
         require!(drop.status == DropStatus::Active, "Drop already cancelled");
         require!(drop.claims.is_empty(), "Drop already claimed");
         drop.status = DropStatus::Cancelled;
+        SlimedropEvent::DropCancelled { public_key }.emit();
         send_drop(drop, drop.created_by.clone())
     }
 
