@@ -1,13 +1,29 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use near_contract_standards::{
+    fungible_token::receiver::FungibleTokenReceiver,
+    non_fungible_token::{self, core::NonFungibleTokenReceiver},
+};
 use near_sdk::{
-    AccountId, BorshStorageKey, CurveType, IntoStorageKey, NearToken, PanicOnDefault, Promise,
-    PublicKey,
+    AccountId, BorshStorageKey, CurveType, Gas, IntoStorageKey, NearToken, PanicOnDefault, Promise,
+    PromiseOrValue, PublicKey,
     env::{self, sha256},
-    json_types::{Base64VecU8, U64},
+    json_types::{Base64VecU8, U64, U128},
     near,
     store::{IterableMap, LookupMap, Vector},
 };
+
+use multi_token::MultiTokenReceiver;
+
+const FT_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
+const NFT_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
+const MT_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
+const FLAT_FEE_PER_DROP: NearToken = NearToken::from_millinear(50); // 0.05 NEAR
+const MAX_GAS_FOR_CLAIMS: Gas = Gas::from_tgas(200); // leave 100 tgas for the contract itself and near transfer
+const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
+const GAS_FOR_NFT_TRANSFER: Gas = Gas::from_tgas(10);
+const GAS_FOR_MT_TRANSFER: Gas = Gas::from_tgas(10);
+const GAS_FOR_STORAGE_DEPOSIT: Gas = Gas::from_tgas(10);
 
 macro_rules! require {
     (let $p: pat = $e:expr, $message:literal $(, $fmt_args:expr)* $(,)?) => {
@@ -45,8 +61,6 @@ pub enum SlimedropEvent {
     #[event_version("1.0.0")]
     DropCancelled { public_key: PublicKey },
 }
-
-const FLAT_FEE_PER_DROP: NearToken = NearToken::from_millinear(50); // 0.05 NEAR
 
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
@@ -110,16 +124,44 @@ pub struct Claim {
     pub claimed_at_ms: U64,
 }
 
+mod multi_token {
+    use super::*;
+
+    pub type TokenId = String;
+
+    #[allow(dead_code)]
+    pub trait MultiTokenReceiver {
+        fn mt_on_transfer(
+            &mut self,
+            sender_id: AccountId,
+            previous_owner_ids: Vec<AccountId>,
+            token_ids: Vec<TokenId>,
+            amounts: Vec<U128>,
+            msg: String,
+        ) -> PromiseOrValue<Vec<U128>>;
+    }
+}
+
 #[near(serializers=[borsh, json])]
 #[derive(Clone)]
 pub struct DropContents {
+    /// Native NEAR
     pub near: NearToken,
+    /// Fungible tokens
+    pub nep141: HashMap<AccountId, U128>,
+    /// Non-fungible tokens
+    pub nep171: HashMap<AccountId, HashSet<non_fungible_token::TokenId>>,
+    // /// Multi-fungible tokens
+    pub nep245: HashMap<AccountId, HashMap<multi_token::TokenId, U128>>,
 }
 
 impl Default for DropContents {
     fn default() -> Self {
         Self {
             near: NearToken::from_near(0),
+            nep141: HashMap::new(),
+            nep171: HashMap::new(),
+            nep245: HashMap::new(),
         }
     }
 }
@@ -133,6 +175,31 @@ enum DropStorageKey {
     DropClaims,
     DropsClaimedByAccount,
     DropsClaimedByAccountEntries,
+}
+
+fn check_can_add(drop: &Slimedrop) {
+    require!(drop.claims.is_empty(), "Drop already claimed");
+    require!(
+        drop.status == DropStatus::Active,
+        "Cannot add to cancelled drop"
+    );
+    require!(
+        GAS_FOR_FT_TRANSFER
+            .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
+            .saturating_mul(drop.contents.nep141.len() as u64)
+            .saturating_add(
+                GAS_FOR_NFT_TRANSFER
+                    .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
+                    .saturating_mul(drop.contents.nep171.len() as u64)
+            )
+            .saturating_add(
+                GAS_FOR_MT_TRANSFER
+                    .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
+                    .saturating_mul(drop.contents.nep245.len() as u64)
+            )
+            <= MAX_GAS_FOR_CLAIMS,
+        "Insufficient gas to add to drop"
+    );
 }
 
 #[near]
@@ -162,20 +229,14 @@ impl SlimedropContract {
                 drop.created_by == env::predecessor_account_id(),
                 "You can only add NEAR to drops you created"
             );
-            require!(drop.claims.is_empty(), "Drop already claimed");
-            require!(
-                drop.status == DropStatus::Active,
-                "Cannot add to cancelled drop"
-            );
-            let contents = DropContents {
-                near: drop.contents.near.saturating_add(env::attached_deposit()),
-            };
+            check_can_add(drop);
+
+            drop.contents.near = drop.contents.near.saturating_add(env::attached_deposit());
             SlimedropEvent::DropUpdated {
                 public_key,
-                contents: contents.clone(),
+                contents: drop.contents.clone(),
             }
             .emit();
-            drop.contents = contents;
         } else {
             require!(
                 env::attached_deposit() > FLAT_FEE_PER_DROP,
@@ -188,6 +249,9 @@ impl SlimedropContract {
                     near: env::attached_deposit()
                         .checked_sub(FLAT_FEE_PER_DROP)
                         .unwrap_or_else(|| env::panic_str("Attached deposit must be greater than {FLAT_FEE_PER_DROP} to create a new drop")),
+                    nep141: HashMap::new(),
+                    nep171: HashMap::new(),
+                    nep245: HashMap::new(),
                 },
                 created_at_ms: U64(env::block_timestamp_ms()),
                 created_by: env::predecessor_account_id(),
@@ -217,6 +281,9 @@ impl SlimedropContract {
                 public_key,
                 contents: DropContents {
                     near: env::attached_deposit(),
+                    nep141: HashMap::new(),
+                    nep171: HashMap::new(),
+                    nep245: HashMap::new(),
                 },
                 created_by: env::predecessor_account_id(),
             }
@@ -418,8 +485,269 @@ impl SlimedropContract {
         self.fees_earned = NearToken::from_near(0);
         Promise::new(withdraw_to).transfer(near_to_withdraw)
     }
+
+    /// Claim callback
+    #[private]
+    pub fn after_claim(&mut self) {
+        // do nothing, just need to return a promise because can't return a joint promise
+    }
+}
+
+#[near(serializers=[json])]
+pub struct TransferCallMsg {
+    public_key: PublicKey,
+}
+
+#[near]
+impl FungibleTokenReceiver for SlimedropContract {
+    fn ft_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        amount: U128,
+        msg: String,
+    ) -> PromiseOrValue<U128> {
+        require!(
+            let Ok(msg) = near_sdk::serde_json::from_str::<TransferCallMsg>(&msg),
+            "Invalid message"
+        );
+        require!(
+            let Some(drop) = self.drops.get_mut(&msg.public_key),
+            "Key is missing"
+        );
+        require!(amount.0 > 0, "Amount must be greater than 0");
+        require!(
+            drop.created_by == sender_id,
+            "You can only add FTs to drops you created"
+        );
+        check_can_add(drop);
+
+        let token_id = env::predecessor_account_id();
+        drop.contents
+            .nep141
+            .entry(token_id)
+            .and_modify(|amount| {
+                amount.0 = amount.0.saturating_add(amount.0);
+            })
+            .or_insert(amount);
+        drop.contents.near = drop
+            .contents
+            .near
+            .checked_sub(FT_STORAGE_DEPOSIT)
+            .unwrap_or_else(|| env::panic_str(&format!("Insufficient NEAR balance of this gift. Needed {FT_STORAGE_DEPOSIT} for storage deposit, got {}", drop.contents.near)));
+
+        SlimedropEvent::DropUpdated {
+            public_key: msg.public_key,
+            contents: drop.contents.clone(),
+        }
+        .emit();
+
+        PromiseOrValue::Value(0.into())
+    }
+}
+
+#[near]
+impl NonFungibleTokenReceiver for SlimedropContract {
+    fn nft_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        #[allow(unused)] previous_owner_id: AccountId,
+        token_id: non_fungible_token::TokenId,
+        msg: String,
+    ) -> PromiseOrValue<bool> {
+        require!(
+            let Ok(msg) = near_sdk::serde_json::from_str::<TransferCallMsg>(&msg),
+            "Invalid message"
+        );
+        require!(
+            let Some(drop) = self.drops.get_mut(&msg.public_key),
+            "Key is missing"
+        );
+        require!(
+            drop.created_by == sender_id,
+            "You can only add NFTs to drops you created"
+        );
+        check_can_add(drop);
+
+        let nft_contract_id = env::predecessor_account_id();
+        // We don't care about previous owner id if sender is the drop creator
+        drop.contents
+            .nep171
+            .entry(nft_contract_id)
+            .and_modify(|token_ids| {
+                require!(
+                    token_ids.insert(token_id.clone()),
+                    "Token id already exists in this drop"
+                );
+            })
+            .or_insert(HashSet::from([token_id]));
+        drop.contents.near = drop
+            .contents
+            .near
+            .checked_sub(NFT_STORAGE_DEPOSIT)
+            .unwrap_or_else(|| env::panic_str(&format!("Insufficient NEAR balance of this gift. Needed {NFT_STORAGE_DEPOSIT} for storage deposit, got {}", drop.contents.near)));
+
+        SlimedropEvent::DropUpdated {
+            public_key: msg.public_key,
+            contents: drop.contents.clone(),
+        }
+        .emit();
+
+        PromiseOrValue::Value(false)
+    }
+}
+
+#[near]
+impl MultiTokenReceiver for SlimedropContract {
+    fn mt_on_transfer(
+        &mut self,
+        sender_id: AccountId,
+        previous_owner_ids: Vec<AccountId>,
+        token_ids: Vec<multi_token::TokenId>,
+        amounts: Vec<U128>,
+        msg: String,
+    ) -> PromiseOrValue<Vec<U128>> {
+        require!(
+            token_ids.len() == amounts.len() && previous_owner_ids.len() == token_ids.len(),
+            "Token ids, previous owner ids and amounts must have the same length"
+        );
+        require!(
+            let Ok(msg) = near_sdk::serde_json::from_str::<TransferCallMsg>(&msg),
+            "Invalid message"
+        );
+        require!(
+            let Some(drop) = self.drops.get_mut(&msg.public_key),
+            "Key is missing"
+        );
+        require!(
+            drop.created_by == sender_id,
+            "You can only add MTs to drops you created"
+        );
+        check_can_add(drop);
+
+        let mt_contract_id = env::predecessor_account_id();
+        // We don't care about previous owner ids if sender is the drop creator
+        for (token_id, amount) in token_ids.into_iter().zip(amounts.into_iter()) {
+            drop.contents
+                .nep245
+                .entry(mt_contract_id.clone())
+                .and_modify(|token_ids| {
+                    token_ids
+                        .entry(token_id.clone())
+                        .and_modify(|amount| {
+                            amount.0 = amount.0.saturating_add(amount.0);
+                        })
+                        .or_insert(amount);
+                })
+                .or_insert(HashMap::from([(token_id.clone(), amount)]));
+        }
+        drop.contents.near = drop
+            .contents
+            .near
+            .checked_sub(MT_STORAGE_DEPOSIT)
+            .unwrap_or_else(|| env::panic_str(&format!("Insufficient NEAR balance of this gift. Needed {MT_STORAGE_DEPOSIT} for storage deposit, got {}", drop.contents.near)));
+
+        PromiseOrValue::Value(vec![0.into(); previous_owner_ids.len()])
+    }
 }
 
 fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
-    Promise::new(receiver_id).transfer(drop.contents.near)
+    let near_promise = Promise::new(receiver_id.clone()).transfer(drop.contents.near);
+    let nep141_promises = drop
+        .contents
+        .nep141
+        .iter()
+        .map(|(account_id, amount)| {
+            Promise::new(account_id.clone())
+                .function_call(
+                    "storage_deposit".to_string(),
+                    near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
+                        "account_id": receiver_id,
+                    }))
+                    .unwrap(),
+                    FT_STORAGE_DEPOSIT,
+                    GAS_FOR_STORAGE_DEPOSIT,
+                )
+                .function_call(
+                    "ft_transfer".to_string(),
+                    near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
+                        "receiver_id": receiver_id,
+                        "amount": amount,
+                        "memo": "slimedrop",
+                    }))
+                    .unwrap(),
+                    NearToken::from_yoctonear(1),
+                    GAS_FOR_FT_TRANSFER,
+                )
+        })
+        .collect::<Vec<_>>();
+    let nep171_promises = drop
+        .contents
+        .nep171
+        .iter()
+        .flat_map(|(account_id, token_ids)| {
+            token_ids.iter().map(|token_id| {
+                Promise::new(account_id.clone())
+                    .function_call(
+                        "storage_deposit".to_string(),
+                        near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
+                            "account_id": receiver_id,
+                        }))
+                        .unwrap(),
+                        NFT_STORAGE_DEPOSIT,
+                        GAS_FOR_STORAGE_DEPOSIT,
+                    )
+                    .function_call(
+                        "nft_transfer".to_string(),
+                        near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
+                            "receiver_id": receiver_id,
+                            "token_id": token_id,
+                            "memo": "slimedrop",
+                        }))
+                        .unwrap(),
+                        NearToken::from_yoctonear(1),
+                        GAS_FOR_NFT_TRANSFER,
+                    )
+            })
+        })
+        .collect::<Vec<_>>();
+    let nep245_promises = drop
+        .contents
+        .nep245
+        .iter()
+        .map(|(account_id, token_ids)| {
+            Promise::new(account_id.clone())
+                .function_call(
+                    "storage_deposit".to_string(),
+                    near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
+                        "account_id": receiver_id,
+                    }))
+                    .unwrap(),
+                    MT_STORAGE_DEPOSIT,
+                    GAS_FOR_STORAGE_DEPOSIT,
+                )
+                .function_call(
+                    "mt_batch_transfer".to_string(),
+                    near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
+                        "receiver_id": receiver_id,
+                        "token_ids": token_ids.keys().cloned().collect::<Vec<_>>(),
+                        "amounts": token_ids.values().cloned().collect::<Vec<_>>(),
+                        "memo": "slimedrop",
+                    }))
+                    .unwrap(),
+                    NearToken::from_yoctonear(1),
+                    GAS_FOR_MT_TRANSFER,
+                )
+        })
+        .collect::<Vec<_>>();
+    let mut batch_promise = near_promise;
+    for promise in nep141_promises {
+        batch_promise = batch_promise.and(promise);
+    }
+    for promise in nep171_promises {
+        batch_promise = batch_promise.and(promise);
+    }
+    for promise in nep245_promises {
+        batch_promise = batch_promise.and(promise);
+    }
+    batch_promise.then(SlimedropContract::ext(env::current_account_id()).after_claim())
 }
