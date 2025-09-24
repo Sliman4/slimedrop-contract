@@ -145,7 +145,7 @@ impl SlimedropContract {
     /// exists, it will add to the existing balance.
     #[payable]
     pub fn add_near(&mut self, public_key: PublicKey) {
-        assert!(
+        require!(
             env::attached_deposit() > NearToken::from_near(0),
             "Attached deposit must be at least 1 yoctoNEAR"
         );
