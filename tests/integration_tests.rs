@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use near_api::{
@@ -21,7 +22,6 @@ pub struct DropContents {
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(crate = "near_sdk::serde")]
 pub struct Claim {
-    pub account_id: AccountId,
     pub claimed_at_ms: U64,
 }
 
@@ -31,7 +31,7 @@ pub struct SlimedropView {
     pub contents: DropContents,
     pub created_at_ms: U64,
     pub created_by: AccountId,
-    pub claims: Vec<Claim>,
+    pub claims: HashMap<AccountId, Claim>,
     pub status: DropStatus,
 }
 
@@ -1430,11 +1430,9 @@ async fn test_get_key_info_with_claims() -> Result<(), Box<dyn std::error::Error
     assert_eq!(drop_after.contents.near, ONE_NEAR);
     assert_eq!(drop_after.created_by, sender_account.id().clone());
     assert_eq!(drop_after.claims.len(), 1);
-    assert_eq!(
-        drop_after.claims[0].account_id,
-        receiver_account.id().clone()
-    );
-    assert!(drop_after.claims[0].claimed_at_ms.0 > 0);
+    assert!(drop_after.claims.contains_key(receiver_account.id()));
+    let claim = drop_after.claims.get(receiver_account.id()).unwrap();
+    assert!(claim.claimed_at_ms.0 > 0);
 
     Ok(())
 }
@@ -1965,20 +1963,14 @@ async fn test_get_account_claimed_drops() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(claimed_drops[0].1.contents.near, ONE_NEAR);
     assert_eq!(claimed_drops[0].1.created_by, sender_account.id().clone());
     assert_eq!(claimed_drops[0].1.claims.len(), 1);
-    assert_eq!(
-        claimed_drops[0].1.claims[0].account_id,
-        claimer_account.id().clone()
-    );
+    assert!(claimed_drops[0].1.claims.contains_key(claimer_account.id()));
 
     // Verify second claimed drop
     assert_eq!(claimed_drops[1].0, public_key2);
     assert_eq!(claimed_drops[1].1.contents.near, ONE_NEAR.saturating_mul(2));
     assert_eq!(claimed_drops[1].1.created_by, sender_account.id().clone());
     assert_eq!(claimed_drops[1].1.claims.len(), 1);
-    assert_eq!(
-        claimed_drops[1].1.claims[0].account_id,
-        claimer_account.id().clone()
-    );
+    assert!(claimed_drops[1].1.claims.contains_key(claimer_account.id()));
 
     // Test pagination with limit
     let limited_drops_outcome = contract

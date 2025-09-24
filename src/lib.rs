@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use near_sdk::{
-    AccountId, CurveType, NearToken, PanicOnDefault, Promise, PublicKey,
+    AccountId, BorshStorageKey, CurveType, IntoStorageKey, NearToken, PanicOnDefault, Promise,
+    PublicKey,
     env::{self, sha256},
     json_types::{Base64VecU8, U64},
     near,
@@ -59,8 +62,7 @@ pub struct Slimedrop {
     pub contents: DropContents,
     pub created_at_ms: U64,
     pub created_by: AccountId,
-    // Replace with LookupSet<Claim> next migration
-    pub claims: Vector<Claim>,
+    pub claims: IterableMap<AccountId, Claim>,
     pub status: DropStatus,
 }
 
@@ -76,7 +78,7 @@ pub struct SlimedropView {
     pub contents: DropContents,
     pub created_at_ms: U64,
     pub created_by: AccountId,
-    pub claims: Vec<Claim>,
+    pub claims: HashMap<AccountId, Claim>,
     pub status: DropStatus,
 }
 
@@ -86,16 +88,19 @@ impl From<&Slimedrop> for SlimedropView {
             contents: drop.contents.clone(),
             created_at_ms: drop.created_at_ms,
             created_by: drop.created_by.clone(),
-            claims: drop.claims.into_iter().cloned().collect(),
+            claims: drop
+                .claims
+                .iter()
+                .map(|(account_id, claim)| (account_id.clone(), claim.clone()))
+                .collect(),
             status: drop.status,
         }
     }
 }
 
 #[near(serializers=[borsh, json])]
-#[derive(Clone)]
+#[derive(Clone, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Claim {
-    pub account_id: AccountId,
     pub claimed_at_ms: U64,
 }
 
@@ -113,13 +118,16 @@ impl Default for DropContents {
     }
 }
 
-// Replace with borsh storage key enum next migration
-const DROPS_PREFIX: &[u8] = b"a";
-const DROPS_OWNED_BY_ACCOUNT_PREFIX: &[u8] = b"b";
-const DROPS_OWNED_BY_ACCOUNT_VECTOR_PREFIX: &[u8] = b"c";
-const DROP_CLAIMS_PREFIX: &[u8] = b"d";
-const DROPS_CLAIMED_BY_ACCOUNT_PREFIX: &[u8] = b"e";
-const DROPS_CLAIMED_BY_ACCOUNT_VECTOR_PREFIX: &[u8] = b"f";
+#[near(serializers=[borsh])]
+#[derive(BorshStorageKey)]
+enum DropStorageKey {
+    Drops,
+    DropsOwnedByAccount,
+    DropsOwnedByAccountEntries,
+    DropClaims,
+    DropsClaimedByAccount,
+    DropsClaimedByAccountEntries,
+}
 
 #[near]
 impl SlimedropContract {
@@ -127,9 +135,9 @@ impl SlimedropContract {
     #[init]
     pub fn new() -> Self {
         Self {
-            drops: LookupMap::new(DROPS_PREFIX),
-            drops_owned_by_account: IterableMap::new(DROPS_OWNED_BY_ACCOUNT_PREFIX),
-            drops_claimed_by_account: IterableMap::new(DROPS_CLAIMED_BY_ACCOUNT_PREFIX),
+            drops: LookupMap::new(DropStorageKey::Drops),
+            drops_owned_by_account: IterableMap::new(DropStorageKey::DropsOwnedByAccount),
+            drops_claimed_by_account: IterableMap::new(DropStorageKey::DropsClaimedByAccount),
         }
     }
 
@@ -167,7 +175,13 @@ impl SlimedropContract {
                 },
                 created_at_ms: U64(env::block_timestamp_ms()),
                 created_by: env::predecessor_account_id(),
-                claims: Vector::new([DROP_CLAIMS_PREFIX, public_key.as_bytes()].concat()),
+                claims: IterableMap::new(
+                    [
+                        DropStorageKey::DropClaims.into_storage_key(),
+                        public_key.as_bytes().to_vec(),
+                    ]
+                    .concat(),
+                ),
                 status: DropStatus::Active,
             };
             self.drops.insert(public_key.clone(), drop);
@@ -176,8 +190,8 @@ impl SlimedropContract {
                 .or_insert_with(|| {
                     Vector::new(
                         [
-                            DROPS_OWNED_BY_ACCOUNT_VECTOR_PREFIX,
-                            env::predecessor_account_id().as_bytes(),
+                            DropStorageKey::DropsOwnedByAccountEntries.into_storage_key(),
+                            env::predecessor_account_id().as_bytes().to_vec(),
                         ]
                         .concat(),
                     )
@@ -275,23 +289,23 @@ impl SlimedropContract {
         );
         require!(drop.claims.is_empty(), "Drop already claimed");
         require!(
-            drop.claims
-                .iter()
-                .all(|claim| claim.account_id != receiver_id),
+            !drop.claims.contains_key(&receiver_id),
             "Drop already claimed by this account"
         );
         require!(drop.status == DropStatus::Active, "Drop is not active");
-        drop.claims.push(Claim {
-            account_id: receiver_id.clone(),
-            claimed_at_ms: U64(current_timestamp_ms),
-        });
+        drop.claims.insert(
+            receiver_id.clone(),
+            Claim {
+                claimed_at_ms: U64(current_timestamp_ms),
+            },
+        );
         self.drops_claimed_by_account
             .entry(receiver_id.clone())
             .or_insert_with(|| {
                 Vector::new(
                     [
-                        DROPS_CLAIMED_BY_ACCOUNT_VECTOR_PREFIX,
-                        receiver_id.as_bytes(),
+                        DropStorageKey::DropsClaimedByAccountEntries.into_storage_key(),
+                        receiver_id.as_bytes().to_vec(),
                     ]
                     .concat(),
                 )
