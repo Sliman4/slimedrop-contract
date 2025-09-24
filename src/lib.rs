@@ -234,13 +234,13 @@ impl SlimedropContract {
         self.drops.get(&key).map(|drop| drop.into())
     }
 
-    /// Returns the drops an account has contributed to.
+    /// Returns the drops an account has created.
     pub fn get_account_drops(
         &self,
         account_id: AccountId,
         skip: Option<U64>,
         limit: Option<U64>,
-    ) -> Vec<SlimedropView> {
+    ) -> Vec<(PublicKey, SlimedropView)> {
         let Some(drops_owned_by_account) = self.drops_owned_by_account.get(&account_id) else {
             return vec![];
         };
@@ -251,10 +251,13 @@ impl SlimedropContract {
             .skip(skip.0 as usize)
             .take(limit.0 as usize)
             .map(|key| {
-                self.drops
-                    .get(key)
-                    .unwrap_or_else(|| env::panic_str("Key is missing"))
-                    .into()
+                (
+                    key.clone(),
+                    self.drops
+                        .get(key)
+                        .unwrap_or_else(|| env::panic_str("Key is missing"))
+                        .into(),
+                )
             })
             .collect()
     }

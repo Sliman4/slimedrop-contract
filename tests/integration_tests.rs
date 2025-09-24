@@ -4,7 +4,7 @@ use near_api::{
     SignerTrait,
     signer::{NEP413Payload, secret_key::SecretKeySigner},
 };
-use near_crypto::{KeyType, SecretKey, Signature};
+use near_crypto::{KeyType, PublicKey, SecretKey, Signature};
 use near_sdk::{
     AccountId, NearToken,
     json_types::{Base64VecU8, U64},
@@ -1028,18 +1028,22 @@ async fn test_get_account_drops() -> Result<(), Box<dyn std::error::Error>> {
         .args_json(json!({"account_id": user_account.id()}))
         .await?;
 
-    let drops = drops_outcome.json::<Vec<SlimedropView>>().unwrap();
+    let drops = drops_outcome
+        .json::<Vec<(PublicKey, SlimedropView)>>()
+        .unwrap();
     assert_eq!(drops.len(), 2);
 
     // Check first drop
-    assert_eq!(drops[0].contents.near, ONE_NEAR);
-    assert_eq!(drops[0].created_by, user_account.id().clone());
-    assert!(drops[0].claims.is_empty());
+    assert_eq!(drops[0].0, public_key1);
+    assert_eq!(drops[0].1.contents.near, ONE_NEAR);
+    assert_eq!(drops[0].1.created_by, user_account.id().clone());
+    assert!(drops[0].1.claims.is_empty());
 
     // Check second drop
-    assert_eq!(drops[1].contents.near, ONE_NEAR.saturating_mul(2));
-    assert_eq!(drops[1].created_by, user_account.id().clone());
-    assert!(drops[1].claims.is_empty());
+    assert_eq!(drops[1].0, public_key2);
+    assert_eq!(drops[1].1.contents.near, ONE_NEAR.saturating_mul(2));
+    assert_eq!(drops[1].1.created_by, user_account.id().clone());
+    assert!(drops[1].1.claims.is_empty());
 
     // Test pagination
     let bounded_drops_outcome = contract
@@ -1051,7 +1055,9 @@ async fn test_get_account_drops() -> Result<(), Box<dyn std::error::Error>> {
         }))
         .await?;
 
-    let bounded_drops = bounded_drops_outcome.json::<Vec<SlimedropView>>().unwrap();
+    let bounded_drops = bounded_drops_outcome
+        .json::<Vec<(PublicKey, SlimedropView)>>()
+        .unwrap();
     assert_eq!(bounded_drops.len(), 1);
 
     // Test for account with no drops
@@ -1067,7 +1073,9 @@ async fn test_get_account_drops() -> Result<(), Box<dyn std::error::Error>> {
         .args_json(json!({"account_id": empty_account.id()}))
         .await?;
 
-    let empty_drops = empty_drops_outcome.json::<Vec<SlimedropView>>().unwrap();
+    let empty_drops = empty_drops_outcome
+        .json::<Vec<(PublicKey, SlimedropView)>>()
+        .unwrap();
     assert!(empty_drops.is_empty());
 
     Ok(())
