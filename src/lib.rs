@@ -30,7 +30,7 @@ const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_FOR_NFT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_FOR_MT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_FOR_STORAGE_DEPOSIT: Gas = Gas::from_tgas(10);
-const GAS_FOR_TRANSFER_CALLBACK: Gas = Gas::from_tgas(3);
+const GAS_FOR_STORAGE_DEPOSIT_CALLBACK: Gas = Gas::from_tgas(5);
 
 macro_rules! require {
     (let $p: pat = $e:expr, $message:literal $(, $fmt_args:expr)* $(,)?) => {
@@ -207,13 +207,13 @@ fn check_can_add(drop: &Slimedrop) {
     );
     const GAS_FOR_FT_TRANSFER_FULL: Gas = GAS_FOR_FT_TRANSFER
         .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
-        .saturating_add(GAS_FOR_TRANSFER_CALLBACK);
+        .saturating_add(GAS_FOR_STORAGE_DEPOSIT_CALLBACK);
     const GAS_FOR_NFT_TRANSFER_FULL: Gas = GAS_FOR_NFT_TRANSFER
         .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
-        .saturating_add(GAS_FOR_TRANSFER_CALLBACK);
+        .saturating_add(GAS_FOR_STORAGE_DEPOSIT_CALLBACK);
     const GAS_FOR_MT_TRANSFER_FULL: Gas = GAS_FOR_MT_TRANSFER
         .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
-        .saturating_add(GAS_FOR_TRANSFER_CALLBACK);
+        .saturating_add(GAS_FOR_STORAGE_DEPOSIT_CALLBACK);
     let gas_for_fts = GAS_FOR_FT_TRANSFER_FULL.saturating_mul(drop.contents.nep141.len() as u64);
     let gas_for_nfts = GAS_FOR_NFT_TRANSFER_FULL.saturating_mul(drop.contents.nep171.len() as u64);
     let gas_for_mts = GAS_FOR_MT_TRANSFER_FULL.saturating_mul(drop.contents.nep245.len() as u64);
@@ -739,7 +739,7 @@ fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
                 .storage_deposit(Some(receiver_id.clone()), Some(false))
                 .then(
                     SlimedropContract::ext(env::current_account_id())
-                        .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
+                        .with_static_gas(GAS_FOR_STORAGE_DEPOSIT_CALLBACK)
                         .after_ft_storage_deposit(
                             account_id.clone(),
                             receiver_id.clone(),
@@ -760,7 +760,7 @@ fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
                     .storage_deposit(Some(receiver_id.clone()), Some(false))
                     .then(
                         SlimedropContract::ext(env::current_account_id())
-                            .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
+                            .with_static_gas(GAS_FOR_STORAGE_DEPOSIT_CALLBACK)
                             .after_nft_storage_deposit(
                                 account_id.clone(),
                                 token_id.clone(),
@@ -781,7 +781,7 @@ fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
                 .storage_deposit(Some(receiver_id.clone()), Some(false))
                 .then(
                     SlimedropContract::ext(env::current_account_id())
-                        .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
+                        .with_static_gas(GAS_FOR_STORAGE_DEPOSIT_CALLBACK)
                         .after_mt_storage_deposit(
                             account_id.clone(),
                             token_ids.keys().cloned().collect::<Vec<_>>(),
