@@ -739,7 +739,9 @@ fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
                 .storage_deposit(Some(receiver_id.clone()), Some(false))
                 .then(
                     SlimedropContract::ext(env::current_account_id())
-                        .with_static_gas(GAS_FOR_STORAGE_DEPOSIT_CALLBACK)
+                        .with_static_gas(
+                            GAS_FOR_STORAGE_DEPOSIT_CALLBACK.saturating_add(GAS_FOR_FT_TRANSFER),
+                        )
                         .after_ft_storage_deposit(
                             account_id.clone(),
                             receiver_id.clone(),
@@ -760,7 +762,10 @@ fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
                     .storage_deposit(Some(receiver_id.clone()), Some(false))
                     .then(
                         SlimedropContract::ext(env::current_account_id())
-                            .with_static_gas(GAS_FOR_STORAGE_DEPOSIT_CALLBACK)
+                            .with_static_gas(
+                                GAS_FOR_STORAGE_DEPOSIT_CALLBACK
+                                    .saturating_add(GAS_FOR_NFT_TRANSFER),
+                            )
                             .after_nft_storage_deposit(
                                 account_id.clone(),
                                 token_id.clone(),
@@ -781,7 +786,9 @@ fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
                 .storage_deposit(Some(receiver_id.clone()), Some(false))
                 .then(
                     SlimedropContract::ext(env::current_account_id())
-                        .with_static_gas(GAS_FOR_STORAGE_DEPOSIT_CALLBACK)
+                        .with_static_gas(
+                            GAS_FOR_STORAGE_DEPOSIT_CALLBACK.saturating_add(GAS_FOR_MT_TRANSFER),
+                        )
                         .after_mt_storage_deposit(
                             account_id.clone(),
                             token_ids.keys().cloned().collect::<Vec<_>>(),
