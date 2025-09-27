@@ -3380,6 +3380,7 @@ async fn test_mixed_drop_all_token_types() -> Result<(), Box<dyn std::error::Err
         balance_increase_near > NearToken::from_millinear(750),
         "Receiver should have received most of the NEAR"
     );
+    println!("outcome: {:#?}", claim_outcome);
     assert_eq!(
         balance_increase_ft, 100,
         "Receiver should have received 100 FT"

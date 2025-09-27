@@ -1,8 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
 use near_contract_standards::{
-    fungible_token::receiver::FungibleTokenReceiver,
-    non_fungible_token::{self, core::NonFungibleTokenReceiver},
+    fungible_token::{core::ext_ft_core, receiver::FungibleTokenReceiver},
+    non_fungible_token::{
+        self,
+        core::{NonFungibleTokenReceiver, ext_nft_core},
+    },
+    storage_management::ext_storage_management,
 };
 use near_sdk::{
     AccountId, BorshStorageKey, CurveType, Gas, IntoStorageKey, NearToken, PanicOnDefault, Promise,
@@ -15,6 +19,8 @@ use near_sdk::{
 
 use multi_token::MultiTokenReceiver;
 
+use crate::multi_token::ext_mt_core;
+
 const FT_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
 const NFT_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
 const MT_STORAGE_DEPOSIT: NearToken = NearToken::from_millinear(5); // 0.005 NEAR
@@ -24,6 +30,7 @@ const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_FOR_NFT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_FOR_MT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_FOR_STORAGE_DEPOSIT: Gas = Gas::from_tgas(10);
+const GAS_FOR_TRANSFER_CALLBACK: Gas = Gas::from_tgas(3);
 
 macro_rules! require {
     (let $p: pat = $e:expr, $message:literal $(, $fmt_args:expr)* $(,)?) => {
@@ -125,6 +132,8 @@ pub struct Claim {
 }
 
 mod multi_token {
+    use near_sdk::ext_contract;
+
     use super::*;
 
     pub type TokenId = String;
@@ -140,6 +149,19 @@ mod multi_token {
             msg: String,
         ) -> PromiseOrValue<Vec<U128>>;
     }
+
+    #[allow(dead_code)]
+    #[ext_contract(ext_mt_core)]
+    pub trait MultiTokenCore {
+        fn mt_batch_transfer(
+            &mut self,
+            receiver_id: AccountId,
+            token_ids: Vec<TokenId>,
+            amounts: Vec<U128>,
+            approvals: Option<Vec<Option<(AccountId, String)>>>,
+            memo: Option<String>,
+        ) -> PromiseOrValue<Vec<U128>>;
+    }
 }
 
 #[near(serializers=[borsh, json])]
@@ -151,7 +173,7 @@ pub struct DropContents {
     pub nep141: HashMap<AccountId, U128>,
     /// Non-fungible tokens
     pub nep171: HashMap<AccountId, HashSet<non_fungible_token::TokenId>>,
-    // /// Multi-fungible tokens
+    /// Multi-fungible tokens
     pub nep245: HashMap<AccountId, HashMap<multi_token::TokenId, U128>>,
 }
 
@@ -183,20 +205,22 @@ fn check_can_add(drop: &Slimedrop) {
         drop.status == DropStatus::Active,
         "Cannot add to cancelled drop"
     );
+    const GAS_FOR_FT_TRANSFER_FULL: Gas = GAS_FOR_FT_TRANSFER
+        .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
+        .saturating_add(GAS_FOR_TRANSFER_CALLBACK);
+    const GAS_FOR_NFT_TRANSFER_FULL: Gas = GAS_FOR_NFT_TRANSFER
+        .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
+        .saturating_add(GAS_FOR_TRANSFER_CALLBACK);
+    const GAS_FOR_MT_TRANSFER_FULL: Gas = GAS_FOR_MT_TRANSFER
+        .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
+        .saturating_add(GAS_FOR_TRANSFER_CALLBACK);
+    let gas_for_fts = GAS_FOR_FT_TRANSFER_FULL.saturating_mul(drop.contents.nep141.len() as u64);
+    let gas_for_nfts = GAS_FOR_NFT_TRANSFER_FULL.saturating_mul(drop.contents.nep171.len() as u64);
+    let gas_for_mts = GAS_FOR_MT_TRANSFER_FULL.saturating_mul(drop.contents.nep245.len() as u64);
     require!(
-        GAS_FOR_FT_TRANSFER
-            .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
-            .saturating_mul(drop.contents.nep141.len() as u64)
-            .saturating_add(
-                GAS_FOR_NFT_TRANSFER
-                    .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
-                    .saturating_mul(drop.contents.nep171.len() as u64)
-            )
-            .saturating_add(
-                GAS_FOR_MT_TRANSFER
-                    .saturating_add(GAS_FOR_STORAGE_DEPOSIT)
-                    .saturating_mul(drop.contents.nep245.len() as u64)
-            )
+        gas_for_fts
+            .saturating_add(gas_for_nfts)
+            .saturating_add(gas_for_mts)
             <= MAX_GAS_FOR_CLAIMS,
         "Insufficient gas to add to drop"
     );
@@ -491,6 +515,58 @@ impl SlimedropContract {
     pub fn after_claim(&mut self) {
         // do nothing, just need to return a promise because can't return a joint promise
     }
+
+    /// Callback after storage_deposit on FT. We don't care about whether it succeeded or not,
+    /// since not all tokens have / require storage deposit.
+    #[private]
+    pub fn after_ft_storage_deposit(
+        &mut self,
+        ft_id: AccountId,
+        receiver_id: AccountId,
+        amount: U128,
+    ) -> Promise {
+        ext_ft_core::ext(ft_id)
+            .with_static_gas(GAS_FOR_FT_TRANSFER)
+            .with_attached_deposit(NearToken::from_yoctonear(1))
+            .ft_transfer(receiver_id, amount, Some("slimedrop".to_string()))
+    }
+
+    /// Callback after storage_deposit on NFT. We don't care about whether it succeeded or not,
+    /// since not all tokens have / require storage deposit.
+    #[private]
+    pub fn after_nft_storage_deposit(
+        &mut self,
+        nft_id: AccountId,
+        token_id: non_fungible_token::TokenId,
+        receiver_id: AccountId,
+    ) -> Promise {
+        ext_nft_core::ext(nft_id)
+            .with_static_gas(GAS_FOR_NFT_TRANSFER)
+            .with_attached_deposit(NearToken::from_yoctonear(1))
+            .nft_transfer(receiver_id, token_id, None, Some("slimedrop".to_string()))
+    }
+
+    /// Callback after storage_deposit on MT. We don't care about whether it succeeded or not,
+    /// since not all tokens have / require storage deposit.
+    #[private]
+    pub fn after_mt_storage_deposit(
+        &mut self,
+        mt_id: AccountId,
+        token_ids: Vec<multi_token::TokenId>,
+        amounts: Vec<U128>,
+        receiver_id: AccountId,
+    ) -> Promise {
+        ext_mt_core::ext(mt_id)
+            .with_static_gas(GAS_FOR_MT_TRANSFER)
+            .with_attached_deposit(NearToken::from_yoctonear(1))
+            .mt_batch_transfer(
+                receiver_id,
+                token_ids,
+                amounts,
+                None,
+                Some("slimedrop".to_string()),
+            )
+    }
 }
 
 #[near(serializers=[json])]
@@ -657,26 +733,18 @@ fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
         .nep141
         .iter()
         .map(|(account_id, amount)| {
-            Promise::new(account_id.clone())
-                .function_call(
-                    "storage_deposit".to_string(),
-                    near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
-                        "account_id": receiver_id,
-                    }))
-                    .unwrap(),
-                    FT_STORAGE_DEPOSIT,
-                    GAS_FOR_STORAGE_DEPOSIT,
-                )
-                .function_call(
-                    "ft_transfer".to_string(),
-                    near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
-                        "receiver_id": receiver_id,
-                        "amount": amount,
-                        "memo": "slimedrop",
-                    }))
-                    .unwrap(),
-                    NearToken::from_yoctonear(1),
-                    GAS_FOR_FT_TRANSFER,
+            ext_storage_management::ext(account_id.clone())
+                .with_attached_deposit(FT_STORAGE_DEPOSIT)
+                .with_static_gas(GAS_FOR_STORAGE_DEPOSIT)
+                .storage_deposit(Some(receiver_id.clone()), Some(false))
+                .then(
+                    SlimedropContract::ext(env::current_account_id())
+                        .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
+                        .after_ft_storage_deposit(
+                            account_id.clone(),
+                            receiver_id.clone(),
+                            amount.clone(),
+                        ),
                 )
         })
         .collect::<Vec<_>>();
@@ -686,26 +754,18 @@ fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
         .iter()
         .flat_map(|(account_id, token_ids)| {
             token_ids.iter().map(|token_id| {
-                Promise::new(account_id.clone())
-                    .function_call(
-                        "storage_deposit".to_string(),
-                        near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
-                            "account_id": receiver_id,
-                        }))
-                        .unwrap(),
-                        NFT_STORAGE_DEPOSIT,
-                        GAS_FOR_STORAGE_DEPOSIT,
-                    )
-                    .function_call(
-                        "nft_transfer".to_string(),
-                        near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
-                            "receiver_id": receiver_id,
-                            "token_id": token_id,
-                            "memo": "slimedrop",
-                        }))
-                        .unwrap(),
-                        NearToken::from_yoctonear(1),
-                        GAS_FOR_NFT_TRANSFER,
+                ext_storage_management::ext(account_id.clone())
+                    .with_attached_deposit(NFT_STORAGE_DEPOSIT)
+                    .with_static_gas(GAS_FOR_STORAGE_DEPOSIT)
+                    .storage_deposit(Some(receiver_id.clone()), Some(false))
+                    .then(
+                        SlimedropContract::ext(env::current_account_id())
+                            .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
+                            .after_nft_storage_deposit(
+                                account_id.clone(),
+                                token_id.clone(),
+                                receiver_id.clone(),
+                            ),
                     )
             })
         })
@@ -715,27 +775,19 @@ fn send_drop(drop: &Slimedrop, receiver_id: AccountId) -> Promise {
         .nep245
         .iter()
         .map(|(account_id, token_ids)| {
-            Promise::new(account_id.clone())
-                .function_call(
-                    "storage_deposit".to_string(),
-                    near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
-                        "account_id": receiver_id,
-                    }))
-                    .unwrap(),
-                    MT_STORAGE_DEPOSIT,
-                    GAS_FOR_STORAGE_DEPOSIT,
-                )
-                .function_call(
-                    "mt_batch_transfer".to_string(),
-                    near_sdk::serde_json::to_vec(&near_sdk::serde_json::json!({
-                        "receiver_id": receiver_id,
-                        "token_ids": token_ids.keys().cloned().collect::<Vec<_>>(),
-                        "amounts": token_ids.values().cloned().collect::<Vec<_>>(),
-                        "memo": "slimedrop",
-                    }))
-                    .unwrap(),
-                    NearToken::from_yoctonear(1),
-                    GAS_FOR_MT_TRANSFER,
+            ext_storage_management::ext(account_id.clone())
+                .with_attached_deposit(MT_STORAGE_DEPOSIT)
+                .with_static_gas(GAS_FOR_STORAGE_DEPOSIT)
+                .storage_deposit(Some(receiver_id.clone()), Some(false))
+                .then(
+                    SlimedropContract::ext(env::current_account_id())
+                        .with_static_gas(GAS_FOR_TRANSFER_CALLBACK)
+                        .after_mt_storage_deposit(
+                            account_id.clone(),
+                            token_ids.keys().cloned().collect::<Vec<_>>(),
+                            token_ids.values().cloned().collect::<Vec<_>>(),
+                            receiver_id.clone(),
+                        ),
                 )
         })
         .collect::<Vec<_>>();
